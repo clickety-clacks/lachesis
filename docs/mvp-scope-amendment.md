@@ -1,6 +1,6 @@
 # MVP file-store scope amendment
 
-Mike approved this amendment on 2026-08-19. It supersedes the reviewed service spec only
+This amendment was approved on 2026-08-19. It supersedes the reviewed service spec only
 for Keychain-backed MVP bindings and native Keychain interruption proof.
 
 ## Binding scope
