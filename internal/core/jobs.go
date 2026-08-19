@@ -153,6 +153,12 @@ func (j *JobManager) runOnboard(ctx context.Context, job *managedJob, accountID,
 	}
 	j.transition(job, "verifying", nil, nil)
 	binding := adapter.ManagedBinding(home)
+	cleanHome := filepath.Clean(home)
+	cleanCredential := filepath.Clean(binding.CredentialPath)
+	if binding.Kind != "file" || filepath.Clean(binding.Home) != cleanHome || !filepath.IsAbs(cleanCredential) || filepath.Dir(cleanCredential) != cleanHome {
+		j.cleanupFail(job, fileOnlySourceDetail(job.model.Provider, label, binding.Kind), home)
+		return
+	}
 	st, err := j.service.stores(binding)
 	if err != nil {
 		j.cleanupFail(job, teach.New(teach.CredentialMissing, "The managed credential cannot be opened.", "onboard", nil, map[string]any{}, nil, "retry onboarding"), home)

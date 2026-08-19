@@ -94,7 +94,7 @@ func (s *Server) adopt(w http.ResponseWriter, r *http.Request) {
 		fail(w, d)
 		return
 	}
-	binding, d := s.service.ResolveSource(in.Provider, in.Source.Kind, in.Source.Path, in.Source.Service, in.Source.Account)
+	binding, d := s.service.ResolveSource(in.Provider, in.Label, in.Source.Kind, in.Source.Path)
 	if d != nil {
 		fail(w, d)
 		return

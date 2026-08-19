@@ -35,7 +35,15 @@ func New(client *http.Client) *Adapter {
 func (*Adapter) Name() model.Provider { return model.ProviderClaude }
 func (*Adapter) CLIAvailable() bool   { _, err := exec.LookPath("claude"); return err == nil }
 func (*Adapter) DefaultBinding() (model.StoreBinding, *model.ErrorDetail) {
-	return model.StoreBinding{Kind: "keychain", Service: "Claude Code-credentials", Account: "default"}, nil
+	home := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR"))
+	if home == "" {
+		return model.StoreBinding{}, detail(teach.KeychainSourceUnsupported, "The default Claude login is not an MVP file store.")
+	}
+	if !filepath.IsAbs(home) {
+		return model.StoreBinding{}, detail(teach.InvalidRequest, "CLAUDE_CONFIG_DIR must name an absolute provider home.")
+	}
+	home = filepath.Clean(home)
+	return model.StoreBinding{Kind: "file", Home: home, CredentialPath: filepath.Join(home, ".credentials.json")}, nil
 }
 func (*Adapter) ManagedBinding(home string) model.StoreBinding {
 	return model.StoreBinding{Kind: "file", Home: home, CredentialPath: filepath.Join(home, ".credentials.json")}

@@ -28,6 +28,7 @@ const (
 	CredentialCleanupPending        = "CREDENTIAL_CLEANUP_PENDING"
 	CredentialCommitFailed          = "CREDENTIAL_COMMIT_FAILED"
 	KeychainAtomicCommitUnavailable = "KEYCHAIN_ATOMIC_COMMIT_UNAVAILABLE"
+	KeychainSourceUnsupported       = "KEYCHAIN_SOURCE_UNSUPPORTED"
 	UpstreamContractChanged         = "UPSTREAM_CONTRACT_CHANGED"
 	CLIMissing                      = "CLI_MISSING"
 	UpstreamUnavailable             = "UPSTREAM_UNAVAILABLE"
@@ -47,6 +48,7 @@ var status = map[string]int{
 	CredentialCleanupPending:        http.StatusInternalServerError,
 	CredentialCommitFailed:          http.StatusInternalServerError,
 	KeychainAtomicCommitUnavailable: http.StatusInternalServerError,
+	KeychainSourceUnsupported:       http.StatusBadRequest,
 	UpstreamContractChanged:         http.StatusBadGateway, CLIMissing: http.StatusServiceUnavailable,
 	UpstreamUnavailable: http.StatusServiceUnavailable, UpstreamTimeout: http.StatusServiceUnavailable,
 }
@@ -83,6 +85,8 @@ func remedySummary(code string) string {
 		return "Retry the exact call."
 	case CLIMissing:
 		return "Install the provider CLI, then retry."
+	case KeychainSourceUnsupported:
+		return "Onboard a file-backed account or adopt an explicit provider home."
 	default:
 		return "Follow one of the concrete next actions."
 	}

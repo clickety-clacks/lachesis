@@ -82,7 +82,7 @@ func (k *Keychain) Commit(ctx context.Context, _ [32]byte, _ []byte) error {
 		return ctx.Err()
 	default:
 	}
-	// Native mutation stays disabled until the human A-9 interruption proofs
-	// demonstrate complete old-or-new update and absent-or-complete-new create.
+	// Native Keychain mutation is outside the file-only MVP. The adapter remains
+	// fail-closed and is not reachable from the production store factory.
 	return ErrAtomicUnavailable
 }

@@ -70,8 +70,6 @@ func defaultStoreFactory(b model.StoreBinding) (store.Adapter, error) {
 	switch b.Kind {
 	case "file":
 		return store.NewFile(b.Home, b.CredentialPath)
-	case "keychain":
-		return store.NewKeychain(b.Service, b.Account)
 	default:
 		return nil, fmt.Errorf("unsupported store kind %q", b.Kind)
 	}
@@ -86,27 +84,46 @@ func (s *Service) SetClockForTests(now func() time.Time) {
 
 func (s *Service) Jobs() *JobManager { return s.jobs }
 
-func (s *Service) ResolveSource(p model.Provider, kind, path, serviceName, account string) (model.StoreBinding, *model.ErrorDetail) {
+func (s *Service) ResolveSource(p model.Provider, label, kind, path string) (model.StoreBinding, *model.ErrorDetail) {
 	a := s.adapters[p]
 	if a == nil {
 		return model.StoreBinding{}, teach.New(teach.InvalidRequest, "The provider is unsupported.", "adopt", nil, map[string]any{"provider": p}, nil, "use codex or claude")
 	}
 	switch kind {
 	case "default":
-		return a.DefaultBinding()
+		binding, d := a.DefaultBinding()
+		if d != nil && d.Code == teach.KeychainSourceUnsupported {
+			return model.StoreBinding{}, fileOnlySourceDetail(p, label, "default")
+		}
+		return binding, d
 	case "home":
 		if !filepath.IsAbs(path) {
 			return model.StoreBinding{}, teach.New(teach.InvalidRequest, "A home source requires an absolute path.", "adopt", nil, map[string]any{}, nil, "supply an absolute path")
 		}
 		return a.ManagedBinding(filepath.Clean(path)), nil
 	case "keychain":
-		if p != model.ProviderClaude || serviceName == "" || account == "" {
-			return model.StoreBinding{}, teach.New(teach.InvalidRequest, "Keychain requires Claude, service, and account.", "adopt", nil, map[string]any{}, nil, "correct the source")
-		}
-		return model.StoreBinding{Kind: "keychain", Service: serviceName, Account: account}, nil
+		return model.StoreBinding{}, fileOnlySourceDetail(p, label, "keychain")
 	default:
 		return model.StoreBinding{}, teach.New(teach.InvalidRequest, "Source kind must be default, home, or keychain.", "adopt", nil, map[string]any{}, nil, "correct the source kind")
 	}
+}
+
+func fileOnlySourceDetail(p model.Provider, label, sourceKind string) *model.ErrorDetail {
+	label = strings.TrimSpace(label)
+	if label == "" {
+		label = "account-label"
+	}
+	return teach.New(
+		teach.KeychainSourceUnsupported,
+		"Keychain account sources are outside the file-only MVP.",
+		"adopt",
+		[]model.Prerequisite{{Code: "FILE_CREDENTIAL_HOME", Description: "Use onboarding or an explicit provider home.", Met: false}},
+		map[string]any{"provider": p, "source_kind": sourceKind, "mvp_store_kind": "file"},
+		[]model.RemedyCall{
+			{Method: "POST", Path: "/api/v1/accounts", Body: map[string]any{"provider": p, "label": label}},
+			{Method: "POST", Path: "/api/v1/accounts/adopt", Body: map[string]any{"provider": p, "label": label, "source": map[string]any{"kind": "home", "path": "/absolute/provider/home"}}},
+		},
+	)
 }
 
 func (s *Service) reconcile() *model.ErrorDetail {
@@ -201,6 +218,9 @@ func (s *Service) Adopt(ctx context.Context, p model.Provider, label string, bin
 	a := s.adapters[p]
 	if a == nil {
 		return model.Account{}, teach.New(teach.InvalidRequest, "The provider is unsupported.", "adopt", nil, map[string]any{"provider": p}, nil, "use codex or claude")
+	}
+	if binding.Kind != "file" {
+		return model.Account{}, fileOnlySourceDetail(p, label, binding.Kind)
 	}
 	st, err := s.stores(binding)
 	if err != nil {

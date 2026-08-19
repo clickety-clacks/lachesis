@@ -2,11 +2,40 @@ package claude
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/clickety-clacks/lachesis/internal/teach"
 )
+
+func TestDefaultBindingUsesClaudeConfigDirFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", home)
+	binding, detail := New(nil).DefaultBinding()
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	if binding.Kind != "file" || binding.Home != home || binding.CredentialPath != filepath.Join(home, ".credentials.json") {
+		t.Fatalf("binding = %#v", binding)
+	}
+}
+
+func TestDefaultBindingRejectsPersonalKeychainFallback(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	binding, detail := New(nil).DefaultBinding()
+	if detail == nil || detail.Code != teach.KeychainSourceUnsupported || binding.Kind != "" {
+		t.Fatalf("binding = %#v, detail = %#v", binding, detail)
+	}
+}
+
+func TestDefaultBindingRejectsRelativeClaudeConfigDir(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "relative-home")
+	_, detail := New(nil).DefaultBinding()
+	if detail == nil || detail.Code != teach.InvalidRequest {
+		t.Fatalf("detail = %#v", detail)
+	}
+}
 
 func TestNormalizeRejectsOutOfRangeUtilization(t *testing.T) {
 	raw := json.RawMessage(`{"five_hour":{"utilization":1.01}}`)
