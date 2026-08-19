@@ -22,21 +22,6 @@ static OSStatus tb_read(const char *service, const char *account, UInt8 **out, C
   CFRelease(q); CFRelease(s); CFRelease(a); return status;
 }
 
-static OSStatus tb_update(const char *service,const char *account,const UInt8 *bytes,CFIndex n){
-  CFStringRef s=tb_string(service),a=tb_string(account); CFDataRef d=CFDataCreate(NULL,bytes,n);
-  const void *qk[]={kSecClass,kSecAttrService,kSecAttrAccount}; const void *qv[]={kSecClassGenericPassword,s,a};
-  CFDictionaryRef q=CFDictionaryCreate(NULL,qk,qv,3,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
-  const void *ak[]={kSecValueData}; const void *av[]={d};
-  CFDictionaryRef attrs=CFDictionaryCreate(NULL,ak,av,1,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
-  OSStatus status=SecItemUpdate(q,attrs); CFRelease(attrs);CFRelease(q);CFRelease(d);CFRelease(s);CFRelease(a);return status;
-}
-
-static OSStatus tb_add(const char *service,const char *account,const UInt8 *bytes,CFIndex n){
-  CFStringRef s=tb_string(service),a=tb_string(account); CFDataRef d=CFDataCreate(NULL,bytes,n);
-  const void *keys[]={kSecClass,kSecAttrService,kSecAttrAccount,kSecValueData}; const void *vals[]={kSecClassGenericPassword,s,a,d};
-  CFDictionaryRef q=CFDictionaryCreate(NULL,keys,vals,4,&kCFTypeDictionaryKeyCallBacks,&kCFTypeDictionaryValueCallBacks);
-  OSStatus status=SecItemAdd(q,NULL);CFRelease(q);CFRelease(d);CFRelease(s);CFRelease(a);return status;
-}
 */
 import "C"
 
@@ -91,39 +76,13 @@ func (k *Keychain) Digest(ctx context.Context) ([32]byte, error) {
 	}
 	return sha256.Sum256(b), nil
 }
-func (k *Keychain) Commit(ctx context.Context, expected [32]byte, candidate []byte) error {
+func (k *Keychain) Commit(ctx context.Context, _ [32]byte, _ []byte) error {
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
 	}
-	current, readErr := k.Read(ctx)
-	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
-		return readErr
-	}
-	exists := readErr == nil
-	if exists && sha256.Sum256(current) != expected {
-		return ErrChanged
-	}
-	s := C.CString(k.binding.Service)
-	a := C.CString(k.binding.Account)
-	defer C.free(unsafe.Pointer(s))
-	defer C.free(unsafe.Pointer(a))
-	var p *C.UInt8
-	if len(candidate) > 0 {
-		p = (*C.UInt8)(unsafe.Pointer(&candidate[0]))
-	}
-	var status C.OSStatus
-	if exists {
-		status = C.tb_update(s, a, p, C.CFIndex(len(candidate)))
-	} else {
-		status = C.tb_add(s, a, p, C.CFIndex(len(candidate)))
-	}
-	if status != 0 {
-		if status == C.errSecDuplicateItem {
-			return ErrChanged
-		}
-		return fmt.Errorf("keychain commit status %d", int(status))
-	}
-	return nil
+	// Native mutation stays disabled until the human A-9 interruption proofs
+	// demonstrate complete old-or-new update and absent-or-complete-new create.
+	return ErrAtomicUnavailable
 }

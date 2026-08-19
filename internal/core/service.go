@@ -198,9 +198,6 @@ func (s *Service) Adopt(ctx context.Context, p model.Provider, label string, bin
 	if d := validateAccountInput(p, label); d != nil {
 		return model.Account{}, d
 	}
-	if existing, ok := s.registry.FindStore(binding.CanonicalKey()); ok {
-		return model.Account{}, teach.New(teach.StoreAlreadyRegistered, "The credential store is already registered.", "accounts", nil, map[string]any{"account_id": existing.ID}, []model.RemedyCall{{Method: "GET", Path: "/api/v1/accounts/" + existing.ID}})
-	}
 	a := s.adapters[p]
 	if a == nil {
 		return model.Account{}, teach.New(teach.InvalidRequest, "The provider is unsupported.", "adopt", nil, map[string]any{"provider": p}, nil, "use codex or claude")
@@ -208,6 +205,10 @@ func (s *Service) Adopt(ctx context.Context, p model.Provider, label string, bin
 	st, err := s.stores(binding)
 	if err != nil {
 		return model.Account{}, teach.New(teach.InvalidRequest, "The credential store binding is invalid.", "adopt", nil, map[string]any{}, nil, "correct the source")
+	}
+	binding = st.Binding()
+	if existing, ok := s.registry.FindStore(binding.CanonicalKey()); ok {
+		return model.Account{}, teach.New(teach.StoreAlreadyRegistered, "The credential store is already registered.", "accounts", nil, map[string]any{"account_id": existing.ID}, []model.RemedyCall{{Method: "GET", Path: "/api/v1/accounts/" + existing.ID}})
 	}
 	raw, err := st.Read(ctx)
 	if err != nil {
@@ -293,16 +294,19 @@ func (s *Service) Refresh(ctx context.Context, id string) (model.Account, *model
 	adapter := s.adapters[row.Provider]
 	original, d := adapter.ParseCredential(raw)
 	if d != nil {
+		d = accountAwareDetail(id, d)
 		s.applyError(r, d, nil)
 		return model.Account{}, d
 	}
 	candidate, d := adapter.Refresh(ctx, original)
 	if d != nil {
+		d = accountAwareDetail(id, d)
 		s.applyError(r, d, nil)
 		return model.Account{}, d
 	}
 	parsed, d := adapter.ParseCredential(candidate)
 	if d != nil {
+		d = accountAwareDetail(id, d)
 		s.applyError(r, d, nil)
 		return model.Account{}, d
 	}
@@ -328,12 +332,14 @@ func (s *Service) Refresh(ctx context.Context, id string) (model.Account, *model
 	}
 	cred, d := adapter.ParseCredential(committed)
 	if d != nil {
+		d = accountAwareDetail(id, d)
 		s.applyError(r, d, nil)
 		return model.Account{}, d
 	}
 	sample, d := adapter.Usage(ctx, cred)
 	now := s.now().UTC()
 	if d != nil {
+		d = accountAwareDetail(id, d)
 		s.cache.Clear(id)
 		s.applyError(r, d, &now)
 		return model.Account{}, d
@@ -455,14 +461,37 @@ func (s *Service) fetchDirect(ctx context.Context, row model.RegistryAccount) (*
 	}
 	cred, d := s.adapters[row.Provider].ParseCredential(raw)
 	if d != nil {
-		return nil, d
+		return nil, accountAwareDetail(row.ID, d)
 	}
 	sample, d := s.adapters[row.Provider].Usage(ctx, cred)
+	d = accountAwareDetail(row.ID, d)
 	if sample != nil {
 		sample.AccountID = row.ID
 		sample.Label = row.Label
 	}
 	return sample, d
+}
+
+func accountAwareDetail(id string, detail *model.ErrorDetail) *model.ErrorDetail {
+	if detail == nil {
+		return nil
+	}
+	state := make(map[string]any, len(detail.State)+1)
+	for key, value := range detail.State {
+		state[key] = value
+	}
+	state["account_id"] = id
+	base := "/api/v1/accounts/" + id
+	switch detail.Code {
+	case teach.CredentialMissing, teach.CredentialRejected, teach.TokenScopeInsufficient, teach.RefreshRejected:
+		return teach.New(detail.Code, detail.Message, "re-onboard", detail.Prerequisites, state,
+			[]model.RemedyCall{{Method: "POST", Path: base + "/re-onboard"}})
+	case teach.CredentialExpiryUnknown:
+		return teach.New(detail.Code, detail.Message, "refresh", detail.Prerequisites, state,
+			[]model.RemedyCall{{Method: "POST", Path: base + "/refresh"}, {Method: "POST", Path: base + "/re-onboard"}})
+	default:
+		return detail
+	}
 }
 
 func (s *Service) fetchAccount(ctx context.Context, row model.RegistryAccount) (*model.UsageSample, *model.ErrorDetail) {

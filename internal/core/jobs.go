@@ -229,11 +229,11 @@ func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row mode
 	}
 	cred, d := adapter.ParseCredential(candidate)
 	if d != nil {
-		j.cleanupFail(job, d, tx)
+		j.cleanupFail(job, accountAwareDetail(row.ID, d), tx)
 		return
 	}
 	if _, d = adapter.Usage(ctx, cred); d != nil {
-		j.cleanupFail(job, d, tx)
+		j.cleanupFail(job, accountAwareDetail(row.ID, d), tx)
 		return
 	}
 	original, err := j.service.stores(row.Store)
@@ -243,8 +243,11 @@ func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row mode
 	}
 	old, readErr := original.Read(ctx)
 	expected := store.DigestBytes(old)
-	if readErr != nil {
+	if errors.Is(readErr, os.ErrNotExist) {
 		expected = [32]byte{}
+	} else if readErr != nil {
+		j.cleanupFail(job, teach.New(teach.CredentialCommitFailed, "The original store cannot be read.", "re-onboard", nil, map[string]any{"store_kind": row.Store.Kind}, []model.RemedyCall{{Method: "POST", Path: "/api/v1/accounts/" + row.ID + "/verify"}}), tx)
+		return
 	}
 	j.transition(job, "committing", nil, nil)
 	if err = original.Commit(ctx, expected, candidate); err != nil {

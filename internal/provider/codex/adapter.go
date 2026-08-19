@@ -167,17 +167,27 @@ func normalize(raw json.RawMessage, observed time.Time) (*model.UsageSample, *mo
 		return nil, detail(teach.UpstreamContractChanged, "Codex usage did not match the adapter contract.")
 	}
 	windows := []model.Window{}
-	if w, ok := toWindow("primary", "Primary", doc.Rate.Primary, observed); ok {
+	if w, ok, d := toWindow("primary", "Primary", doc.Rate.Primary, observed); d != nil {
+		return nil, d
+	} else if ok {
 		windows = append(windows, w)
 	}
-	if w, ok := toWindow("secondary", "Secondary", doc.Rate.Secondary, observed); ok {
+	if w, ok, d := toWindow("secondary", "Secondary", doc.Rate.Secondary, observed); d != nil {
+		return nil, d
+	} else if ok {
 		windows = append(windows, w)
 	}
 	sort.SliceStable(doc.Additional, func(i, j int) bool { return doc.Additional[i].Name < doc.Additional[j].Name })
 	for _, x := range doc.Additional {
-		if w, ok := toWindow("additional:"+slug(x.Name), x.Name, x.Limit, observed); ok {
-			windows = append(windows, w)
+		id := slug(x.Name)
+		if id == "" {
+			return nil, detail(teach.UpstreamContractChanged, "Codex reported an additional limit without a stable name.")
 		}
+		w, ok, d := toWindow("additional:"+id, x.Name, x.Limit, observed)
+		if d != nil || !ok {
+			return nil, detail(teach.UpstreamContractChanged, "Codex reported an invalid additional limit window.")
+		}
+		windows = append(windows, w)
 	}
 	if len(windows) == 0 {
 		return nil, detail(teach.UpstreamContractChanged, "Codex usage contained no recognized limit window.")
@@ -192,12 +202,12 @@ type window struct {
 	Seconds    *int64   `json:"limit_window_seconds"`
 }
 
-func toWindow(id, name string, w window, observed time.Time) (model.Window, bool) {
+func toWindow(id, name string, w window, observed time.Time) (model.Window, bool, *model.ErrorDetail) {
 	if w.Used == nil {
-		return model.Window{}, false
+		return model.Window{}, false, nil
 	}
 	if *w.Used < 0 || *w.Used > 100 {
-		return model.Window{}, false
+		return model.Window{}, false, detail(teach.UpstreamContractChanged, "Codex reported a percentage outside 0 through 100.")
 	}
 	var reset *time.Time
 	if w.ResetAt != nil {
@@ -207,7 +217,7 @@ func toWindow(id, name string, w window, observed time.Time) (model.Window, bool
 		t := observed.Add(time.Duration(*w.ResetAfter) * time.Second).UTC()
 		reset = &t
 	}
-	return model.Window{ID: id, Name: name, UsedPercent: *w.Used, ResetsAt: reset, WindowSeconds: w.Seconds}, true
+	return model.Window{ID: id, Name: name, UsedPercent: *w.Used, ResetsAt: reset, WindowSeconds: w.Seconds}, true, nil
 }
 func slug(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
