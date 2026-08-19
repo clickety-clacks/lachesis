@@ -15,7 +15,10 @@ const (
 	NoAccountsOnboarded             = "NO_ACCOUNTS_ONBOARDED"
 	StoreAlreadyRegistered          = "STORE_ALREADY_REGISTERED"
 	JobActive                       = "JOB_ACTIVE"
+	JobCanceled                     = "JOB_CANCELED"
+	JobProcessStopFailed            = "JOB_PROCESS_STOP_FAILED"
 	LoginTimeout                    = "LOGIN_TIMEOUT"
+	LoginListenerExited             = "LOGIN_LISTENER_EXITED"
 	LoginURLUnavailable             = "LOGIN_URL_UNAVAILABLE"
 	CredentialChanged               = "CREDENTIAL_CHANGED"
 	CredentialStoreBusy             = "CREDENTIAL_STORE_BUSY"
@@ -39,8 +42,9 @@ var status = map[string]int{
 	InvalidRequest: http.StatusBadRequest, AccountNotFound: http.StatusNotFound,
 	JobNotFound: http.StatusNotFound, HelpTopicNotFound: http.StatusNotFound,
 	NoAccountsOnboarded: http.StatusConflict, StoreAlreadyRegistered: http.StatusConflict,
-	JobActive: http.StatusConflict, LoginTimeout: http.StatusConflict,
-	LoginURLUnavailable: http.StatusBadGateway, CredentialChanged: http.StatusConflict,
+	JobActive: http.StatusConflict, JobCanceled: http.StatusConflict,
+	JobProcessStopFailed: http.StatusInternalServerError, LoginTimeout: http.StatusConflict,
+	LoginListenerExited: http.StatusBadGateway, LoginURLUnavailable: http.StatusBadGateway, CredentialChanged: http.StatusConflict,
 	CredentialStoreBusy: http.StatusConflict, CredentialExpiryUnknown: http.StatusConflict,
 	CredentialMissing: http.StatusConflict, CredentialRejected: http.StatusConflict,
 	TokenScopeInsufficient: http.StatusConflict, RefreshRejected: http.StatusConflict,

@@ -86,7 +86,7 @@ func main() {
 		names = append(names, topic.Name)
 	}
 	sort.Strings(names)
-	wantNames := []string{"accounts", "adopt", "health", "onboard", "re-onboard", "refresh", "usage", "verify"}
+	wantNames := []string{"accounts", "adopt", "health", "jobs", "onboard", "re-onboard", "refresh", "usage", "verify"}
 	if fmt.Sprint(names) != fmt.Sprint(wantNames) {
 		fatalf("invalid help topic set: %v", names)
 	}

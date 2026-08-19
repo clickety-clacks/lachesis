@@ -177,13 +177,29 @@ func normalize(raw json.RawMessage, observed time.Time) (*model.UsageSample, *mo
 	} else if ok {
 		windows = append(windows, w)
 	}
-	sort.SliceStable(doc.Additional, func(i, j int) bool { return doc.Additional[i].Name < doc.Additional[j].Name })
-	for _, x := range doc.Additional {
-		id := slug(x.Name)
-		if id == "" {
-			return nil, detail(teach.UpstreamContractChanged, "Codex reported an additional limit without a stable name.")
+	type positionedLimit struct {
+		position int
+		name     string
+		limit    window
+	}
+	additional := make([]positionedLimit, 0, len(doc.Additional))
+	for i, x := range doc.Additional {
+		additional = append(additional, positionedLimit{position: i + 1, name: x.Name, limit: x.Limit})
+	}
+	sort.SliceStable(additional, func(i, j int) bool { return additional[i].name < additional[j].name })
+	seen := map[string]bool{}
+	for _, x := range additional {
+		slugged := slug(x.name)
+		id := "additional:" + slugged
+		name := x.name
+		if slugged == "" {
+			id = fmt.Sprintf("additional:unnamed:%d", x.position)
+			name = fmt.Sprintf("Unnamed additional limit %d", x.position)
+		} else if seen[id] {
+			return nil, detail(teach.UpstreamContractChanged, "Codex reported duplicate additional limit names.")
 		}
-		w, ok, d := toWindow("additional:"+id, x.Name, x.Limit, observed)
+		seen[id] = true
+		w, ok, d := toWindow(id, name, x.limit, observed)
 		if d != nil || !ok {
 			return nil, detail(teach.UpstreamContractChanged, "Codex reported an invalid additional limit window.")
 		}

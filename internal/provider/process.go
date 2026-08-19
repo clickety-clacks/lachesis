@@ -13,7 +13,10 @@ type commandProcess struct {
 }
 
 func StartCommand(ctx context.Context, executable string, args []string, env []string) (LoginProcess, error) {
-	cmd := exec.CommandContext(ctx, executable, args...)
+	// The job manager owns the interrupt, grace, kill, and reap sequence. Binding
+	// the command to ctx would let os/exec kill it before that owner can act.
+	_ = ctx
+	cmd := exec.Command(executable, args...)
 	cmd.Env = env
 	r, w := io.Pipe()
 	cmd.Stdout = w

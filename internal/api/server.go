@@ -41,6 +41,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/accounts/adopt", s.adopt)
 	s.mux.HandleFunc("POST /api/v1/accounts", s.onboard)
 	s.mux.HandleFunc("GET /api/v1/jobs/{id}", s.job)
+	s.mux.HandleFunc("POST /api/v1/jobs/{id}/cancel", s.cancelJob)
 	s.mux.HandleFunc("POST /api/v1/accounts/{id}/verify", s.verify)
 	s.mux.HandleFunc("POST /api/v1/accounts/{id}/re-onboard", s.reOnboard)
 	s.mux.HandleFunc("POST /api/v1/accounts/{id}/refresh", s.refresh)
@@ -128,6 +129,18 @@ func (s *Server) onboard(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) job(w http.ResponseWriter, r *http.Request) {
 	job, d := s.service.Jobs().Get(r.PathValue("id"))
+	if d != nil {
+		fail(w, d)
+		return
+	}
+	write(w, http.StatusOK, job)
+}
+func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
+	if d := emptyBody(r); d != nil {
+		fail(w, d)
+		return
+	}
+	job, d := s.service.Jobs().Cancel(r.PathValue("id"))
 	if d != nil {
 		fail(w, d)
 		return
