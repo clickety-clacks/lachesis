@@ -74,6 +74,7 @@ type JobManager struct {
 	beforeStart    func(*managedJob)
 	beforeCommit   func(*managedJob)
 	afterCommit    func(*managedJob)
+	onCommitWait   func(*managedJob)
 }
 
 func NewJobManager(s *Service) *JobManager {
@@ -144,22 +145,29 @@ func (j *JobManager) Cancel(id string) (model.Job, *model.ErrorDetail) {
 		j.mu.Unlock()
 		return result, nil
 	}
-	waitForWorker := true
 	if job.commitClaim {
-		done := job.terminalDone
+		if j.onCommitWait != nil {
+			j.onCommitWait(job)
+		}
+		workerDone := job.workerDone
 		j.mu.Unlock()
-		<-done
-		<-job.workerDone
-		return j.Get(id)
+		<-workerDone
+		j.mu.RLock()
+		result := job.model
+		if result.State == "stop_failed" {
+			detail := result.Error
+			j.mu.RUnlock()
+			return model.Job{}, detail
+		}
+		j.mu.RUnlock()
+		return result, nil
 	}
 	if job.claim == nil {
 		j.recordClaimLocked(job, &terminalClaim{state: "canceled", detail: j.canceledDetail(job)}, "canceling")
 	}
 	j.mu.Unlock()
 	j.ensureStop(job)
-	if waitForWorker {
-		<-job.workerDone
-	}
+	<-job.workerDone
 	j.mu.RLock()
 	result := job.model
 	if result.State == "stop_failed" {

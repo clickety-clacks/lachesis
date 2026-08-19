@@ -157,12 +157,20 @@ func TestCancelJobEndpointRejectsBodyAndMissingJob(t *testing.T) {
 	}
 	defer svc.Close()
 	handler := New(svc).Handler()
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/job_missing/cancel", strings.NewReader(`{}`)))
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("body status %d: %s", rr.Code, rr.Body.String())
+	for name, body := range map[string]string{
+		"object":                     `{}`,
+		"whitespace prefixed object": `  {}`,
+		"oversized whitespace":       strings.Repeat(" ", (1<<20)+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/job_missing/cancel", strings.NewReader(body)))
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("body status %d: %s", rr.Code, rr.Body.String())
+			}
+		})
 	}
-	rr = httptest.NewRecorder()
+	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/job_missing/cancel", nil))
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("missing status %d: %s", rr.Code, rr.Body.String())

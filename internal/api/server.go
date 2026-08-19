@@ -240,8 +240,9 @@ func decode(r *http.Request, dst any) *model.ErrorDetail {
 	return nil
 }
 func emptyBody(r *http.Request) *model.ErrorDetail {
-	b, _ := io.ReadAll(io.LimitReader(r.Body, 2))
-	if strings.TrimSpace(string(b)) != "" {
+	const limit = 1 << 20
+	b, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if err != nil || len(b) > limit || strings.TrimSpace(string(b)) != "" {
 		return teach.New(teach.InvalidRequest, "This endpoint takes no request body.", "accounts", nil, map[string]any{}, nil, "retry with an empty body")
 	}
 	return nil

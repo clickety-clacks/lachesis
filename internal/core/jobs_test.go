@@ -236,6 +236,61 @@ func TestLoginExitClassification(t *testing.T) {
 	}
 }
 
+func TestCompletedLoginSuccessWinsObservableDeadline(t *testing.T) {
+	service := openJobService(t, &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) { return nil, nil }})
+	defer service.Close()
+	expected := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(expected, []byte("synthetic"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	job := newManagedJob(model.Job{ID: "job_success_deadline", Provider: model.ProviderCodex, State: "awaiting_user"}, "work")
+	job.lifecycle = processExited
+	job.expected = expected
+	job.exitDone = make(chan struct{})
+	close(job.exitDone)
+	job.outputDone = make(chan outputResult, 1)
+	job.outputDone <- outputResult{}
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	cancel()
+	if detail := service.Jobs().observeLogin(ctx, job); detail != nil {
+		t.Fatalf("completed success lost to deadline: %v", detail)
+	}
+	if !service.Jobs().transitionActive(job, "verifying", nil, nil) || job.model.State != "verifying" {
+		t.Fatalf("job = %#v", job.model)
+	}
+}
+
+func TestRegisteredTimeoutPreservesClaimAndLaterCancel(t *testing.T) {
+	process := newControlledLogin()
+	process.terminateExit = true
+	adapter := &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
+		go process.line("open https://example.invalid/login")
+		return process, nil
+	}}
+	service := openJobService(t, adapter)
+	defer service.Close()
+	job, detail := service.Jobs().StartOnboard(model.ProviderCodex, "work")
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	waitForJobState(t, service, job.ID, "awaiting_user")
+	manager := service.Jobs()
+	manager.mu.RLock()
+	managed := manager.jobs[job.ID]
+	manager.mu.RUnlock()
+	manager.recordFailure(managed, manager.timeoutDetail(managed))
+	manager.ensureStop(managed)
+	job = waitForJobState(t, service, job.ID, "failed")
+	if job.Error == nil || job.Error.Code != teach.LoginTimeout || job.AuthorizationURL != nil || process.waits.Load() != 1 {
+		t.Fatalf("job = %#v, waits = %d", job, process.waits.Load())
+	}
+	updated := job.UpdatedAt
+	again, detail := manager.Cancel(job.ID)
+	if detail != nil || again.State != "failed" || again.Error == nil || again.Error.Code != teach.LoginTimeout || !again.UpdatedAt.Equal(updated) {
+		t.Fatalf("again = %#v, detail = %#v", again, detail)
+	}
+}
+
 func TestCancelPreservesProviderCredentialAndIsIdempotent(t *testing.T) {
 	var processes []*controlledLogin
 	adapter := &jobAdapter{start: func(home string) (provider.LoginProcess, *model.ErrorDetail) {
@@ -526,13 +581,35 @@ func TestPostCommitCleanupFailureDoesNotRetryInternally(t *testing.T) {
 		t.Fatal(detail)
 	}
 	var removals atomic.Int32
+	cleanupStarted := make(chan struct{})
+	releaseCleanup := make(chan struct{})
+	commitWaitStarted := make(chan struct{})
+	service.Jobs().onCommitWait = func(*managedJob) { close(commitWaitStarted) }
 	service.Jobs().removeAll = func(string) error {
 		removals.Add(1)
+		close(cleanupStarted)
+		<-releaseCleanup
 		return errors.New("synthetic removal refusal")
 	}
 	job, detail := service.Jobs().StartReOnboard(account.ID)
 	if detail != nil {
 		t.Fatal(detail)
+	}
+	<-cleanupStarted
+	cancelDone := make(chan *model.ErrorDetail, 1)
+	go func() {
+		_, cancelDetail := service.Jobs().Cancel(job.ID)
+		cancelDone <- cancelDetail
+	}()
+	<-commitWaitStarted
+	close(releaseCleanup)
+	select {
+	case cancelDetail := <-cancelDone:
+		if cancelDetail == nil || cancelDetail.Code != teach.CredentialCleanupPending {
+			t.Fatalf("cancel detail = %#v", cancelDetail)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Cancel remained blocked after committed cleanup entered stop_failed")
 	}
 	job = waitForJobState(t, service, job.ID, "stop_failed")
 	service.Jobs().mu.RLock()
@@ -590,6 +667,46 @@ func TestProcessStopFailureHoldsCapacityUntilLateExit(t *testing.T) {
 	}
 	if _, detail = service.Jobs().StartOnboard(model.ProviderCodex, "replacement"); detail != nil {
 		t.Fatalf("replacement = %v", detail)
+	}
+}
+
+func TestRegisteredTimeoutStopFailureRecoversOriginalClaim(t *testing.T) {
+	process := newControlledLogin()
+	adapter := &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
+		go process.line("open https://example.invalid/login")
+		return process, nil
+	}}
+	service := openJobService(t, adapter)
+	defer service.Close()
+	manager := service.Jobs()
+	manager.interruptGrace = time.Millisecond
+	manager.killGrace = time.Millisecond
+	job, detail := manager.StartOnboard(model.ProviderCodex, "work")
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	waitForJobState(t, service, job.ID, "awaiting_user")
+	manager.mu.RLock()
+	managed := manager.jobs[job.ID]
+	manager.mu.RUnlock()
+	manager.recordFailure(managed, manager.timeoutDetail(managed))
+	manager.ensureStop(managed)
+	job = waitForJobState(t, service, job.ID, "stop_failed")
+	if job.Error == nil || job.Error.Code != teach.JobProcessStopFailed || job.Error.State["claimed_terminal_code"] != teach.LoginTimeout {
+		t.Fatalf("job = %#v", job)
+	}
+	if _, activeDetail := manager.StartOnboard(model.ProviderCodex, "blocked"); activeDetail == nil || activeDetail.Code != teach.JobActive {
+		t.Fatalf("active detail = %#v", activeDetail)
+	}
+	process.finish(errors.New("late timeout exit"))
+	job = waitForJobState(t, service, job.ID, "failed")
+	if job.Error == nil || job.Error.Code != teach.LoginTimeout || process.waits.Load() != 1 {
+		t.Fatalf("job = %#v, waits = %d", job, process.waits.Load())
+	}
+	updated := job.UpdatedAt
+	again, detail := manager.Cancel(job.ID)
+	if detail != nil || again.State != "failed" || again.Error == nil || again.Error.Code != teach.LoginTimeout || !again.UpdatedAt.Equal(updated) {
+		t.Fatalf("again = %#v, detail = %#v", again, detail)
 	}
 }
 
