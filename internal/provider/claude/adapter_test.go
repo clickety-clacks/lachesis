@@ -1,0 +1,27 @@
+package claude
+
+import (
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/clickety-clacks/lachesis/internal/teach"
+)
+
+func TestNormalizeRejectsOutOfRangeUtilization(t *testing.T) {
+	raw := json.RawMessage(`{"five_hour":{"utilization":1.01}}`)
+	if _, detail := normalize(raw, time.Unix(1, 0)); detail == nil || detail.Code != teach.UpstreamContractChanged {
+		t.Fatalf("detail = %#v", detail)
+	}
+}
+
+func TestNormalizePreservesValidRawResponse(t *testing.T) {
+	raw := json.RawMessage(`{"five_hour":{"utilization":0.25},"seven_day":{"utilization":0.5}}`)
+	sample, detail := normalize(raw, time.Unix(1, 0))
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	if len(sample.Windows) != 2 || sample.Windows[0].UsedPercent != 25 || string(sample.Raw) != string(raw) {
+		t.Fatalf("sample = %#v", sample)
+	}
+}

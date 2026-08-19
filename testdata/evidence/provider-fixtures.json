@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "usage": {
+    "codex": "unavailable",
+    "claude": "unavailable"
+  },
+  "release_effect": "Human-approved sanitized-real provider compatibility evidence is required before release."
+}
