@@ -113,15 +113,21 @@ type Window struct {
 	WindowSeconds *int64     `json:"window_seconds"`
 }
 
+type Diagnostic struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 type UsageSample struct {
-	AccountID  string          `json:"account_id"`
-	Provider   Provider        `json:"provider"`
-	Label      string          `json:"label"`
-	Plan       *string         `json:"plan"`
-	ObservedAt time.Time       `json:"observed_at"`
-	AgeSeconds int64           `json:"age_seconds"`
-	Windows    []Window        `json:"windows"`
-	Raw        json.RawMessage `json:"raw"`
+	AccountID   string          `json:"account_id"`
+	Provider    Provider        `json:"provider"`
+	Label       string          `json:"label"`
+	Plan        *string         `json:"plan"`
+	ObservedAt  time.Time       `json:"observed_at"`
+	AgeSeconds  int64           `json:"age_seconds"`
+	Windows     []Window        `json:"windows"`
+	Diagnostics []Diagnostic    `json:"diagnostics"`
+	Raw         json.RawMessage `json:"raw"`
 }
 
 type UsageResult struct {

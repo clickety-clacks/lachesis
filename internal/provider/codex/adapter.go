@@ -153,62 +153,98 @@ func (*Adapter) StartLogin(ctx context.Context, home string) (provider.LoginProc
 
 func normalize(raw json.RawMessage, observed time.Time) (*model.UsageSample, *model.ErrorDetail) {
 	var doc struct {
-		Plan *string `json:"plan_type"`
-		Rate struct {
-			Primary   window `json:"primary_window"`
-			Secondary window `json:"secondary_window"`
-		} `json:"rate_limit"`
-		Additional []struct {
-			Name  string `json:"name"`
-			Limit window `json:"rate_limit"`
-		} `json:"additional_rate_limits"`
+		Plan       *string         `json:"plan_type"`
+		Rate       json.RawMessage `json:"rate_limit"`
+		Additional json.RawMessage `json:"additional_rate_limits"`
 	}
-	if json.Unmarshal(raw, &doc) != nil {
+	if !jsonObject(raw) || json.Unmarshal(raw, &doc) != nil {
 		return nil, detail(teach.UpstreamContractChanged, "Codex usage did not match the adapter contract.")
 	}
 	windows := []model.Window{}
-	if w, ok, d := toWindow("primary", "Primary", doc.Rate.Primary, observed); d != nil {
-		return nil, d
-	} else if ok {
-		windows = append(windows, w)
-	}
-	if w, ok, d := toWindow("secondary", "Secondary", doc.Rate.Secondary, observed); d != nil {
-		return nil, d
-	} else if ok {
-		windows = append(windows, w)
+	diagnostics := []model.Diagnostic{}
+	if len(doc.Rate) > 0 {
+		var rate map[string]json.RawMessage
+		if !jsonObject(doc.Rate) || json.Unmarshal(doc.Rate, &rate) != nil {
+			diagnostics = append(diagnostics, codexWindowDiagnostic())
+		} else {
+			for _, candidate := range []struct {
+				key, id, name string
+			}{{"primary_window", "primary", "Primary"}, {"secondary_window", "secondary", "Secondary"}} {
+				rawWindow, present := rate[candidate.key]
+				if !present {
+					continue
+				}
+				if w, ok := decodeWindow(candidate.id, candidate.name, rawWindow, observed); ok {
+					windows = append(windows, w)
+				} else {
+					diagnostics = append(diagnostics, codexWindowDiagnostic())
+				}
+			}
+		}
 	}
 	type positionedLimit struct {
 		position int
 		name     string
-		limit    window
+		id       string
+		window   model.Window
+		omitted  bool
 	}
-	additional := make([]positionedLimit, 0, len(doc.Additional))
-	for i, x := range doc.Additional {
-		additional = append(additional, positionedLimit{position: i + 1, name: x.Name, limit: x.Limit})
+	additional := []positionedLimit{}
+	if len(doc.Additional) > 0 {
+		var entries []json.RawMessage
+		if !jsonArray(doc.Additional) || json.Unmarshal(doc.Additional, &entries) != nil {
+			diagnostics = append(diagnostics, codexWindowDiagnostic())
+		} else {
+			additional = make([]positionedLimit, 0, len(entries))
+			for i, entry := range entries {
+				candidate := positionedLimit{position: i + 1, omitted: true}
+				var decoded struct {
+					Name  string          `json:"name"`
+					Limit json.RawMessage `json:"rate_limit"`
+				}
+				if jsonObject(entry) && json.Unmarshal(entry, &decoded) == nil && len(decoded.Limit) > 0 {
+					candidate.name = decoded.Name
+					slugged := slug(decoded.Name)
+					candidate.id = "additional:" + slugged
+					displayName := decoded.Name
+					if slugged == "" {
+						candidate.id = fmt.Sprintf("additional:unnamed:%d", candidate.position)
+						displayName = fmt.Sprintf("Unnamed additional limit %d", candidate.position)
+					}
+					if w, ok := decodeWindow(candidate.id, displayName, decoded.Limit, observed); ok {
+						candidate.window = w
+						candidate.omitted = false
+					}
+				}
+				additional = append(additional, candidate)
+			}
+		}
 	}
-	sort.SliceStable(additional, func(i, j int) bool { return additional[i].name < additional[j].name })
+	ordered := make([]*positionedLimit, 0, len(additional))
+	for i := range additional {
+		if !additional[i].omitted {
+			ordered = append(ordered, &additional[i])
+		}
+	}
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].name < ordered[j].name })
 	seen := map[string]bool{}
-	for _, x := range additional {
-		slugged := slug(x.name)
-		id := "additional:" + slugged
-		name := x.name
-		if slugged == "" {
-			id = fmt.Sprintf("additional:unnamed:%d", x.position)
-			name = fmt.Sprintf("Unnamed additional limit %d", x.position)
-		} else if seen[id] {
-			return nil, detail(teach.UpstreamContractChanged, "Codex reported duplicate additional limit names.")
+	for _, candidate := range ordered {
+		if seen[candidate.id] {
+			candidate.omitted = true
+			continue
 		}
-		seen[id] = true
-		w, ok, d := toWindow(id, name, x.limit, observed)
-		if d != nil || !ok {
-			return nil, detail(teach.UpstreamContractChanged, "Codex reported an invalid additional limit window.")
+		seen[candidate.id] = true
+		windows = append(windows, candidate.window)
+	}
+	for _, candidate := range additional {
+		if candidate.omitted {
+			diagnostics = append(diagnostics, codexWindowDiagnostic())
 		}
-		windows = append(windows, w)
 	}
 	if len(windows) == 0 {
-		return nil, detail(teach.UpstreamContractChanged, "Codex usage contained no recognized limit window.")
+		return nil, noValidWindowDetail()
 	}
-	return &model.UsageSample{Provider: model.ProviderCodex, Plan: doc.Plan, ObservedAt: observed.UTC(), Windows: windows, Raw: append(json.RawMessage(nil), raw...)}, nil
+	return &model.UsageSample{Provider: model.ProviderCodex, Plan: doc.Plan, ObservedAt: observed.UTC(), Windows: windows, Diagnostics: diagnostics, Raw: append(json.RawMessage(nil), raw...)}, nil
 }
 
 type window struct {
@@ -234,6 +270,38 @@ func toWindow(id, name string, w window, observed time.Time) (model.Window, bool
 		reset = &t
 	}
 	return model.Window{ID: id, Name: name, UsedPercent: *w.Used, ResetsAt: reset, WindowSeconds: w.Seconds}, true, nil
+}
+func decodeWindow(id, name string, raw json.RawMessage, observed time.Time) (model.Window, bool) {
+	var decoded window
+	if !jsonObject(raw) || json.Unmarshal(raw, &decoded) != nil {
+		return model.Window{}, false
+	}
+	w, ok, d := toWindow(id, name, decoded, observed)
+	return w, ok && d == nil
+}
+func jsonObject(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return len(trimmed) > 0 && trimmed[0] == '{'
+}
+func jsonArray(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return len(trimmed) > 0 && trimmed[0] == '['
+}
+func codexWindowDiagnostic() model.Diagnostic {
+	return model.Diagnostic{Code: "CODEX_USAGE_WINDOW_OMITTED", Message: "Codex omitted an invalid or unrecognized usage window."}
+}
+func noValidWindowDetail() *model.ErrorDetail {
+	d := teach.New(
+		teach.UpstreamContractChanged,
+		"Codex usage contained no valid recognized limit window.",
+		"usage",
+		[]model.Prerequisite{{Code: "VALID_RECOGNIZED_WINDOW", Description: "The provider response contains at least one valid recognized usage window.", Met: false}},
+		map[string]any{"provider": model.ProviderCodex},
+		nil,
+		"retry the exact call",
+	)
+	d.Remedy.Summary = "Retry the exact call. If the error repeats, update Lachesis before trusting provider usage."
+	return d
 }
 func slug(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))

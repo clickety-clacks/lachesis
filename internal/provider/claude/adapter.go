@@ -157,48 +157,71 @@ type bucket struct {
 
 func normalize(raw json.RawMessage, observed time.Time) (*model.UsageSample, *model.ErrorDetail) {
 	var doc struct {
-		Five   *bucket           `json:"five_hour"`
-		Seven  *bucket           `json:"seven_day"`
-		Sonnet *bucket           `json:"seven_day_sonnet"`
-		Limits map[string]bucket `json:"limits"`
+		Five   json.RawMessage `json:"five_hour"`
+		Seven  json.RawMessage `json:"seven_day"`
+		Sonnet json.RawMessage `json:"seven_day_sonnet"`
+		Limits json.RawMessage `json:"limits"`
 	}
-	if json.Unmarshal(raw, &doc) != nil {
+	if !jsonObject(raw) || json.Unmarshal(raw, &doc) != nil {
 		return nil, detail(teach.UpstreamContractChanged, "Claude usage did not match the adapter contract.")
 	}
 	windows := []model.Window{}
+	diagnostics := []model.Diagnostic{}
 	seen := map[string]bool{}
-	if len(doc.Limits) > 0 {
-		keys := make([]string, 0, len(doc.Limits))
-		for k := range doc.Limits {
-			keys = append(keys, k)
+	for _, candidate := range []struct {
+		id, name string
+		raw      json.RawMessage
+	}{{"five_hour", "Five hour", doc.Five}, {"seven_day", "Seven day", doc.Seven}, {"seven_day_sonnet", "Seven day Sonnet", doc.Sonnet}} {
+		if len(candidate.raw) == 0 {
+			continue
 		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			w, ok := claudeWindow("limit:"+strings.ReplaceAll(k, "/", ":"), k, doc.Limits[k])
-			if !ok {
-				return nil, detail(teach.UpstreamContractChanged, "Claude reported an invalid utilization.")
-			}
+		if w, ok := decodeBucket(candidate.id, candidate.name, candidate.raw); ok {
 			windows = append(windows, w)
-			seen[k] = true
+			seen[candidate.id] = true
+		} else {
+			diagnostics = append(diagnostics, claudeWindowDiagnostic())
 		}
-	} else {
-		for _, x := range []struct {
-			id, name string
-			b        *bucket
-		}{{"five_hour", "Five hour", doc.Five}, {"seven_day", "Seven day", doc.Seven}, {"seven_day_sonnet", "Seven day Sonnet", doc.Sonnet}} {
-			if x.b != nil {
-				w, ok := claudeWindow(x.id, x.name, *x.b)
-				if !ok {
-					return nil, detail(teach.UpstreamContractChanged, "Claude reported an invalid utilization.")
+	}
+	if len(doc.Limits) > 0 {
+		switch {
+		case jsonObject(doc.Limits):
+			var limits map[string]json.RawMessage
+			if json.Unmarshal(doc.Limits, &limits) != nil {
+				diagnostics = append(diagnostics, claudeWindowDiagnostic())
+				break
+			}
+			keys := make([]string, 0, len(limits))
+			for key := range limits {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				id := "limit:" + strings.ReplaceAll(key, "/", ":")
+				w, ok := decodeBucket(id, key, limits[key])
+				if !ok || seen[id] {
+					diagnostics = append(diagnostics, claudeWindowDiagnostic())
+					continue
 				}
 				windows = append(windows, w)
+				seen[id] = true
 			}
+		case jsonArray(doc.Limits):
+			var limits []json.RawMessage
+			if json.Unmarshal(doc.Limits, &limits) != nil {
+				diagnostics = append(diagnostics, claudeWindowDiagnostic())
+				break
+			}
+			for range limits {
+				diagnostics = append(diagnostics, claudeWindowDiagnostic())
+			}
+		default:
+			diagnostics = append(diagnostics, claudeWindowDiagnostic())
 		}
 	}
 	if len(windows) == 0 {
-		return nil, detail(teach.UpstreamContractChanged, "Claude usage contained no recognized limit window.")
+		return nil, noValidWindowDetail()
 	}
-	return &model.UsageSample{Provider: model.ProviderClaude, ObservedAt: observed.UTC(), Windows: windows, Raw: append(json.RawMessage(nil), raw...)}, nil
+	return &model.UsageSample{Provider: model.ProviderClaude, ObservedAt: observed.UTC(), Windows: windows, Diagnostics: diagnostics, Raw: append(json.RawMessage(nil), raw...)}, nil
 }
 func claudeWindow(id, name string, b bucket) (model.Window, bool) {
 	if b.Utilization == nil {
@@ -209,6 +232,37 @@ func claudeWindow(id, name string, b bucket) (model.Window, bool) {
 		return model.Window{}, false
 	}
 	return model.Window{ID: id, Name: name, UsedPercent: p, ResetsAt: b.ResetsAt}, true
+}
+func decodeBucket(id, name string, raw json.RawMessage) (model.Window, bool) {
+	var decoded bucket
+	if !jsonObject(raw) || json.Unmarshal(raw, &decoded) != nil {
+		return model.Window{}, false
+	}
+	return claudeWindow(id, name, decoded)
+}
+func jsonObject(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return len(trimmed) > 0 && trimmed[0] == '{'
+}
+func jsonArray(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return len(trimmed) > 0 && trimmed[0] == '['
+}
+func claudeWindowDiagnostic() model.Diagnostic {
+	return model.Diagnostic{Code: "CLAUDE_USAGE_WINDOW_OMITTED", Message: "Claude omitted an invalid or unrecognized usage window."}
+}
+func noValidWindowDetail() *model.ErrorDetail {
+	d := teach.New(
+		teach.UpstreamContractChanged,
+		"Claude usage contained no valid recognized limit window.",
+		"usage",
+		[]model.Prerequisite{{Code: "VALID_RECOGNIZED_WINDOW", Description: "The provider response contains at least one valid recognized usage window.", Met: false}},
+		map[string]any{"provider": model.ProviderClaude},
+		nil,
+		"retry the exact call",
+	)
+	d.Remedy.Summary = "Retry the exact call. If the error repeats, update Lachesis before trusting provider usage."
+	return d
 }
 func contains(xs []string, want string) bool {
 	for _, x := range xs {

@@ -21,6 +21,7 @@ func (idleChecker) Busy(context.Context, model.Provider) (bool, error) { return 
 
 type fakeAdapter struct {
 	usageDetail *model.ErrorDetail
+	usageSample *model.UsageSample
 	loginValue  []byte
 	provider    model.Provider
 	credential  string
@@ -62,7 +63,11 @@ func (a *fakeAdapter) Usage(context.Context, provider.Credential) (*model.UsageS
 	if a.usageDetail != nil {
 		return nil, a.usageDetail
 	}
-	return &model.UsageSample{Provider: model.ProviderCodex, ObservedAt: time.Unix(1, 0), Windows: []model.Window{{ID: "primary", Name: "Primary", UsedPercent: 10}}, Raw: []byte(`{"ok":true}`)}, nil
+	if a.usageSample != nil {
+		sample := *a.usageSample
+		return &sample, nil
+	}
+	return &model.UsageSample{Provider: a.Name(), ObservedAt: time.Unix(1, 0), Windows: []model.Window{{ID: "primary", Name: "Primary", UsedPercent: 10}}, Diagnostics: []model.Diagnostic{}, Raw: []byte(`{"ok":true}`)}, nil
 }
 func (*fakeAdapter) Refresh(context.Context, provider.Credential) ([]byte, *model.ErrorDetail) {
 	return []byte("refreshed"), nil
@@ -256,6 +261,68 @@ func TestCredentialRejectionTeachesAccountReOnboard(t *testing.T) {
 	}
 	if len(detail.Remedy.Commands) != 0 || detail.Help != "/api/v1/help/re-onboard" {
 		t.Fatalf("teaching detail = %#v", detail)
+	}
+}
+
+func TestAggregatePassesDiagnosticsAndIsolatesFatalAccount(t *testing.T) {
+	degradedAdapter := &fakeAdapter{
+		provider: model.ProviderCodex,
+		usageSample: &model.UsageSample{
+			Provider:    model.ProviderCodex,
+			ObservedAt:  time.Unix(1, 0),
+			Windows:     []model.Window{{ID: "primary", Name: "Primary", UsedPercent: 10}},
+			Diagnostics: []model.Diagnostic{{Code: "CODEX_USAGE_WINDOW_OMITTED", Message: "Codex omitted an invalid or unrecognized usage window."}},
+			Raw:         []byte(`{"ok":true}`),
+		},
+	}
+	failedAdapter := &fakeAdapter{provider: model.ProviderClaude}
+	service, detail := OpenService(t.TempDir(), []provider.Adapter{degradedAdapter, failedAdapter}, idleChecker{})
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	defer service.Close()
+	adopt := func(providerName model.Provider, label string) model.Account {
+		t.Helper()
+		home := t.TempDir()
+		credentialPath := filepath.Join(home, "credential.json")
+		if err := os.WriteFile(credentialPath, []byte("synthetic"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		account, detail := service.Adopt(context.Background(), providerName, label, model.StoreBinding{Kind: "file", Home: home, CredentialPath: credentialPath})
+		if detail != nil {
+			t.Fatal(detail)
+		}
+		return account
+	}
+	degraded := adopt(model.ProviderCodex, "degraded")
+	failed := adopt(model.ProviderClaude, "failed")
+	failedAdapter.usageDetail = teach.New(
+		teach.UpstreamContractChanged,
+		"Claude usage contained no valid recognized limit window.",
+		"usage",
+		[]model.Prerequisite{{Code: "VALID_RECOGNIZED_WINDOW", Description: "The provider response contains at least one valid recognized usage window.", Met: false}},
+		map[string]any{"provider": model.ProviderClaude},
+		nil,
+		"retry the exact call",
+	)
+	service.cache.Clear(degraded.ID)
+	service.cache.Clear(failed.ID)
+
+	aggregate, detail := service.Aggregate(context.Background(), "wait")
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	if len(aggregate.Results) != 2 || aggregate.Results[0].AccountID != degraded.ID || aggregate.Results[1].AccountID != failed.ID {
+		t.Fatalf("results = %#v", aggregate.Results)
+	}
+	if aggregate.Results[0].Status != "live" || aggregate.Results[0].Sample == nil || len(aggregate.Results[0].Sample.Diagnostics) != 1 || aggregate.Results[0].Sample.Diagnostics[0].Code != "CODEX_USAGE_WINDOW_OMITTED" {
+		t.Fatalf("degraded result = %#v", aggregate.Results[0])
+	}
+	if aggregate.Results[1].Status != "error" || aggregate.Results[1].Sample != nil || aggregate.Results[1].Error == nil || aggregate.Results[1].Error.Code != teach.UpstreamContractChanged {
+		t.Fatalf("failed result = %#v", aggregate.Results[1])
+	}
+	if aggregate.Counts["live"] != 1 || aggregate.Counts["error"] != 1 || aggregate.Counts["cache"] != 0 || aggregate.Counts["stale"] != 0 {
+		t.Fatalf("counts = %#v", aggregate.Counts)
 	}
 }
 
