@@ -1,14 +1,12 @@
 package core
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -30,10 +28,6 @@ const (
 type terminalClaim struct {
 	state  string
 	detail *model.ErrorDetail
-}
-
-type outputResult struct {
-	found bool
 }
 
 type managedJob struct {
@@ -471,7 +465,7 @@ func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row mode
 		if !terminalState(job.model.State) {
 			job.model.State = "stop_failed"
 			job.model.UpdatedAt = j.now().UTC()
-			job.model.AuthorizationURL = nil
+			clearLoginPrompt(&job.model)
 			job.model.Error = stopDetail
 		}
 		j.mu.Unlock()
@@ -491,7 +485,7 @@ func (j *JobManager) beginStart(job *managedJob) bool {
 	job.lifecycle = processStarting
 	job.model.State = "starting"
 	job.model.UpdatedAt = j.now().UTC()
-	job.model.AuthorizationURL = nil
+	clearLoginPrompt(&job.model)
 	return true
 }
 
@@ -573,6 +567,14 @@ func (j *JobManager) observeLogin(ctx context.Context, job *managedJob) *model.E
 		return nil
 	case waitErr != nil && credentialExists:
 		detail = teach.New(teach.CredentialRejected, "The provider login command failed.", "onboard", nil, nil, nil, "start the onboarding call again")
+	case result.expired:
+		detail = j.timeoutDetail(job)
+	case result.unavailable && job.model.Provider == model.ProviderCodex:
+		detail = j.deviceAuthorizationUnavailableDetail(job)
+	case result.found && job.model.Provider == model.ProviderCodex && waitErr == nil:
+		detail = teach.New(teach.CredentialMissing, "Codex device authorization completed without writing a credential.", "onboard", nil, map[string]any{"provider": job.model.Provider}, j.jobRemedyCalls(job))
+	case result.found && job.model.Provider == model.ProviderCodex:
+		detail = teach.New(teach.CredentialRejected, "Codex device authorization did not complete.", "onboard", nil, map[string]any{"provider": job.model.Provider}, j.jobRemedyCalls(job))
 	case result.found:
 		detail = j.listenerExitedDetail(job)
 	case waitErr == nil:
@@ -587,19 +589,11 @@ func (j *JobManager) observeLogin(ctx context.Context, job *managedJob) *model.E
 func (j *JobManager) scanLoginOutput(job *managedJob, proc provider.LoginProcess, done chan<- outputResult) {
 	reader := proc.Output()
 	defer reader.Close()
-	scanner := bufio.NewScanner(reader)
-	found := false
-	for scanner.Scan() {
-		if found {
-			continue
-		}
-		if u := urlPattern.FindString(scanner.Text()); u != "" {
-			u = strings.TrimRight(u, ".,;)")
-			found = true
-			j.setAuthorizationURL(job, u)
-		}
+	if job.model.Provider == model.ProviderCodex {
+		done <- scanCodexDeviceOutput(reader, func(url, code string) { j.setDeviceAuthorization(job, url, code) })
+		return
 	}
-	done <- outputResult{found: found}
+	done <- scanBrowserLoginOutput(reader, func(url string) { j.setAuthorizationURL(job, url) })
 }
 
 func (j *JobManager) setAuthorizationURL(job *managedJob, url string) {
@@ -613,6 +607,18 @@ func (j *JobManager) setAuthorizationURL(job *managedJob, url string) {
 	job.model.AuthorizationURL = &url
 }
 
+func (j *JobManager) setDeviceAuthorization(job *managedJob, url, code string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if job.claim != nil || job.commitClaim || terminalState(job.model.State) || job.model.VerificationURL != nil || job.model.UserCode != nil {
+		return
+	}
+	job.model.State = "awaiting_user"
+	job.model.UpdatedAt = j.now().UTC()
+	job.model.VerificationURL = &url
+	job.model.UserCode = &code
+}
+
 func (j *JobManager) transitionActive(job *managedJob, state string, url *string, detail *model.ErrorDetail) bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -622,6 +628,8 @@ func (j *JobManager) transitionActive(job *managedJob, state string, url *string
 	job.model.State = state
 	job.model.UpdatedAt = j.now().UTC()
 	job.model.AuthorizationURL = url
+	job.model.VerificationURL = nil
+	job.model.UserCode = nil
 	job.model.Error = detail
 	return true
 }
@@ -635,7 +643,7 @@ func (j *JobManager) beginCommit(job *managedJob) bool {
 	job.commitClaim = true
 	job.model.State = "committing"
 	job.model.UpdatedAt = j.now().UTC()
-	job.model.AuthorizationURL = nil
+	clearLoginPrompt(&job.model)
 	return true
 }
 
@@ -658,7 +666,7 @@ func (j *JobManager) recordClaimLocked(job *managedJob, claim *terminalClaim, st
 	job.claim = claim
 	job.model.State = state
 	job.model.UpdatedAt = j.now().UTC()
-	job.model.AuthorizationURL = nil
+	clearLoginPrompt(&job.model)
 	job.model.Error = claim.detail
 	job.model.ResultAccount = nil
 	if job.cancel != nil {
@@ -690,7 +698,7 @@ func (j *JobManager) ensureStop(job *managedJob) {
 		if detail != nil && !terminalState(job.model.State) {
 			job.model.State = "stop_failed"
 			job.model.UpdatedAt = j.now().UTC()
-			job.model.AuthorizationURL = nil
+			clearLoginPrompt(&job.model)
 			job.model.Error = detail
 		}
 		job.stopRunning = false
@@ -774,7 +782,7 @@ func (j *JobManager) finalizeClaimLocked(job *managedJob) {
 	claim := job.claim
 	job.model.State = claim.state
 	job.model.UpdatedAt = j.now().UTC()
-	job.model.AuthorizationURL = nil
+	clearLoginPrompt(&job.model)
 	job.model.ResultAccount = nil
 	job.model.Error = claim.detail
 	if j.activeProvider[job.model.Provider] == job.model.ID {
@@ -798,7 +806,7 @@ func (j *JobManager) completeSuccess(job *managedJob, account model.Account) {
 	job.commitClaim = false
 	job.model.State = "succeeded"
 	job.model.UpdatedAt = j.now().UTC()
-	job.model.AuthorizationURL = nil
+	clearLoginPrompt(&job.model)
 	job.model.ResultAccount = &account
 	job.model.Error = nil
 	if j.activeProvider[job.model.Provider] == job.model.ID {
@@ -870,8 +878,27 @@ func (j *JobManager) canceledDetail(job *managedJob) *model.ErrorDetail {
 }
 
 func (j *JobManager) timeoutDetail(job *managedJob) *model.ErrorDetail {
+	if job.model.Provider == model.ProviderCodex {
+		return teach.New(teach.LoginTimeout, "The Codex device authorization code expired before login completed.", "onboard", nil,
+			map[string]any{"provider": job.model.Provider, "job_id": job.model.ID}, j.jobRemedyCalls(job))
+	}
 	return teach.New(teach.LoginTimeout, "The browser login exceeded its 20-minute deadline.", "onboard", nil,
 		map[string]any{"provider": job.model.Provider, "job_id": job.model.ID}, j.jobRemedyCalls(job))
+}
+
+func (j *JobManager) deviceAuthorizationUnavailableDetail(job *managedJob) *model.ErrorDetail {
+	return teach.New(teach.DeviceAuthorizationUnavailable, "Codex device authorization is disabled or unavailable.", "onboard",
+		[]model.Prerequisite{
+			{Code: "CODEX_DEVICE_AUTHORIZATION_SUPPORTED", Description: "The installed Codex CLI supports codex login --device-auth.", Met: false},
+			{Code: "CODEX_DEVICE_AUTHORIZATION_ENABLED", Description: "Device code authentication is enabled in ChatGPT security settings or workspace permissions.", Met: false},
+		}, map[string]any{"provider": job.model.Provider}, j.jobRemedyCalls(job),
+		"enable device code authentication for the account or workspace, then retry the same onboarding call")
+}
+
+func clearLoginPrompt(job *model.Job) {
+	job.AuthorizationURL = nil
+	job.VerificationURL = nil
+	job.UserCode = nil
 }
 
 func (j *JobManager) processStopDetail(job *managedJob) *model.ErrorDetail {

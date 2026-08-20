@@ -150,6 +150,8 @@ type Job struct {
 	AccountID        *string      `json:"account_id"`
 	State            string       `json:"state"`
 	AuthorizationURL *string      `json:"authorization_url"`
+	VerificationURL  *string      `json:"verification_url"`
+	UserCode         *string      `json:"user_code"`
 	CreatedAt        time.Time    `json:"created_at"`
 	UpdatedAt        time.Time    `json:"updated_at"`
 	ResultAccount    *Account     `json:"result_account"`

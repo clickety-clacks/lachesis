@@ -104,7 +104,7 @@ func (a *cancelAdapter) StartLogin(_ context.Context, home string) (provider.Log
 	if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte("synthetic"), 0600); err != nil {
 		return nil, teach.New(teach.CredentialCommitFailed, "Synthetic setup failed.", "onboard", nil, nil, nil)
 	}
-	go func() { _, _ = io.WriteString(a.process.w, "https://example.invalid/login\n") }()
+	go func() { _, _ = io.WriteString(a.process.w, "https://auth.openai.com/codex/device\nTEST-CODE\n") }()
 	return a.process, nil
 }
 
@@ -120,12 +120,14 @@ func TestCancelJobEndpoint(t *testing.T) {
 		t.Fatal(detail)
 	}
 	deadline := time.Now().Add(3 * time.Second)
+	var active model.Job
 	for {
 		current, getDetail := svc.Jobs().Get(job.ID)
 		if getDetail != nil {
 			t.Fatal(getDetail)
 		}
 		if current.State == "awaiting_user" {
+			active = current
 			break
 		}
 		if time.Now().After(deadline) {
@@ -133,13 +135,16 @@ func TestCancelJobEndpoint(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	if active.AuthorizationURL != nil || active.VerificationURL == nil || *active.VerificationURL != "https://auth.openai.com/codex/device" || active.UserCode == nil || *active.UserCode != "TEST-CODE" {
+		t.Fatalf("active job = %#v", active)
+	}
 	rr := httptest.NewRecorder()
 	New(svc).Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+job.ID+"/cancel", nil))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
 	}
 	var canceled model.Job
-	if json.Unmarshal(rr.Body.Bytes(), &canceled) != nil || canceled.State != "canceled" || canceled.Error == nil || canceled.Error.Code != teach.JobCanceled {
+	if json.Unmarshal(rr.Body.Bytes(), &canceled) != nil || canceled.State != "canceled" || canceled.Error == nil || canceled.Error.Code != teach.JobCanceled || canceled.VerificationURL != nil || canceled.UserCode != nil || strings.Contains(rr.Body.String(), "TEST-CODE") {
 		t.Fatalf("body %s", rr.Body.String())
 	}
 	updated := canceled.UpdatedAt
@@ -181,5 +186,22 @@ func TestJobsHelpDescribesCancelAndHeldLocks(t *testing.T) {
 	topic := topics["jobs"]
 	if len(topic.Examples) != 2 || topic.Examples[1].Method != http.MethodPost || topic.Examples[1].Path != "/api/v1/jobs/{id}/cancel" || !strings.Contains(topic.Summary, teach.JobProcessStopFailed) || !strings.Contains(topic.Summary, teach.CredentialCleanupPending) {
 		t.Fatalf("topic = %#v", topic)
+	}
+}
+
+func TestOnboardHelpDescribesRemoteCodexDeviceAuthorization(t *testing.T) {
+	onboard := topics["onboard"]
+	jobs := topics["jobs"]
+	reOnboard := topics["re-onboard"]
+	for name, summary := range map[string]string{"onboard": onboard.Summary, "jobs": jobs.Summary, "re-onboard": reOnboard.Summary} {
+		if !strings.Contains(summary, "device") {
+			t.Fatalf("%s summary = %q", name, summary)
+		}
+	}
+	if !strings.Contains(onboard.Summary, "verification_url") || !strings.Contains(onboard.Summary, "user_code") || !strings.Contains(onboard.Summary, "no callback") || !strings.Contains(onboard.Summary, "SSH-forwarding") {
+		t.Fatalf("onboard topic = %#v", onboard)
+	}
+	if len(onboard.Prerequisites) != 2 || onboard.Prerequisites[1].Code != "CODEX_DEVICE_AUTHORIZATION_ENABLED" {
+		t.Fatalf("onboard prerequisites = %#v", onboard.Prerequisites)
 	}
 }

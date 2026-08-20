@@ -144,9 +144,9 @@ func (a *Adapter) Refresh(ctx context.Context, c provider.Credential) ([]byte, *
 }
 
 func (*Adapter) StartLogin(ctx context.Context, home string) (provider.LoginProcess, *model.ErrorDetail) {
-	p, err := provider.StartCommand(ctx, "codex", []string{"login"}, append(os.Environ(), "CODEX_HOME="+home))
+	p, err := provider.StartCommand(ctx, "codex", []string{"login", "--device-auth"}, append(os.Environ(), "CODEX_HOME="+home))
 	if err != nil {
-		return nil, detail(teach.CLIMissing, "Codex login could not start.")
+		return nil, detail(teach.CLIMissing, "Codex device authorization could not start.")
 	}
 	return p, nil
 }

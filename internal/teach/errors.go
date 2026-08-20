@@ -20,6 +20,7 @@ const (
 	LoginTimeout                    = "LOGIN_TIMEOUT"
 	LoginListenerExited             = "LOGIN_LISTENER_EXITED"
 	LoginURLUnavailable             = "LOGIN_URL_UNAVAILABLE"
+	DeviceAuthorizationUnavailable  = "DEVICE_AUTHORIZATION_UNAVAILABLE"
 	CredentialChanged               = "CREDENTIAL_CHANGED"
 	CredentialStoreBusy             = "CREDENTIAL_STORE_BUSY"
 	CredentialExpiryUnknown         = "CREDENTIAL_EXPIRY_UNKNOWN"
@@ -45,7 +46,8 @@ var status = map[string]int{
 	JobActive: http.StatusConflict, JobCanceled: http.StatusConflict,
 	JobProcessStopFailed: http.StatusInternalServerError, LoginTimeout: http.StatusConflict,
 	LoginListenerExited: http.StatusBadGateway, LoginURLUnavailable: http.StatusBadGateway, CredentialChanged: http.StatusConflict,
-	CredentialStoreBusy: http.StatusConflict, CredentialExpiryUnknown: http.StatusConflict,
+	DeviceAuthorizationUnavailable: http.StatusConflict,
+	CredentialStoreBusy:            http.StatusConflict, CredentialExpiryUnknown: http.StatusConflict,
 	CredentialMissing: http.StatusConflict, CredentialRejected: http.StatusConflict,
 	TokenScopeInsufficient: http.StatusConflict, RefreshRejected: http.StatusConflict,
 	RegistryCommitFailed:            http.StatusInternalServerError,
@@ -89,6 +91,8 @@ func remedySummary(code string) string {
 		return "Retry the exact call."
 	case CLIMissing:
 		return "Install the provider CLI, then retry."
+	case DeviceAuthorizationUnavailable:
+		return "Enable Codex device authorization, then retry the same onboarding call."
 	case KeychainSourceUnsupported:
 		return "Onboard a file-backed account or adopt an explicit provider home."
 	default:

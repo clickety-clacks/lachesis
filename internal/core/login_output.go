@@ -1,0 +1,70 @@
+package core
+
+import (
+	"bufio"
+	"io"
+	"regexp"
+	"strings"
+)
+
+const codexVerificationURL = "https://auth.openai.com/codex/device"
+
+var (
+	ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	userCodePattern   = regexp.MustCompile(`\b[A-Z0-9]{4}-[A-Z0-9]{4}\b`)
+)
+
+type outputResult struct {
+	found       bool
+	unavailable bool
+	expired     bool
+}
+
+func scanBrowserLoginOutput(reader io.Reader, publish func(string)) outputResult {
+	scanner := bufio.NewScanner(reader)
+	found := false
+	for scanner.Scan() {
+		if found {
+			continue
+		}
+		if u := urlPattern.FindString(scanner.Text()); u != "" {
+			found = true
+			publish(strings.TrimRight(u, ".,;)"))
+		}
+	}
+	return outputResult{found: found}
+}
+
+func scanCodexDeviceOutput(reader io.Reader, publish func(string, string)) outputResult {
+	scanner := bufio.NewScanner(reader)
+	verificationURL := ""
+	userCode := ""
+	result := outputResult{}
+	for scanner.Scan() {
+		line := ansiEscapePattern.ReplaceAllString(scanner.Text(), "")
+		lower := strings.ToLower(line)
+		switch {
+		case strings.Contains(lower, "device auth timed out"):
+			result.expired = true
+		case strings.Contains(lower, "device code login is not enabled"),
+			strings.Contains(lower, "please contact your workspace admin to enable device code authentication"),
+			strings.Contains(lower, "device code request failed"),
+			strings.Contains(lower, "unexpected argument '--device-auth'"),
+			strings.Contains(lower, "unrecognized option '--device-auth'"):
+			result.unavailable = true
+		}
+		if verificationURL == "" {
+			if u := urlPattern.FindString(line); u != "" && strings.TrimRight(u, ".,;)") == codexVerificationURL {
+				verificationURL = codexVerificationURL
+			}
+		}
+		if userCode == "" {
+			userCode = userCodePattern.FindString(line)
+		}
+		if !result.found && verificationURL != "" && userCode != "" {
+			result.found = true
+			publish(verificationURL, userCode)
+		}
+	}
+	return result
+}

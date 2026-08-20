@@ -2,10 +2,12 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -58,17 +60,29 @@ func (p *controlledLogin) finish(err error) { p.exitOnce.Do(func() { p.exit <- e
 func (p *controlledLogin) line(line string) {
 	_, _ = io.WriteString(p.writer, line+"\n")
 }
+func (p *controlledLogin) devicePrompt() {
+	p.line("1. Open this link in your browser and sign in to your account")
+	p.line(" \x1b[94m" + codexVerificationURL + "\x1b[0m")
+	p.line("2. Enter this one-time code (expires in 15 minutes)")
+	p.line(" \x1b[94mTEST-CODE\x1b[0m")
+}
 
 type jobAdapter struct {
 	mu      sync.Mutex
+	name    model.Provider
 	starts  int
 	homes   []string
 	start   func(string) (provider.LoginProcess, *model.ErrorDetail)
 	barrier chan struct{}
 }
 
-func (*jobAdapter) Name() model.Provider { return model.ProviderCodex }
-func (*jobAdapter) CLIAvailable() bool   { return true }
+func (a *jobAdapter) Name() model.Provider {
+	if a.name == "" {
+		return model.ProviderCodex
+	}
+	return a.name
+}
+func (*jobAdapter) CLIAvailable() bool { return true }
 func (*jobAdapter) DefaultBinding() (model.StoreBinding, *model.ErrorDetail) {
 	return model.StoreBinding{}, nil
 }
@@ -155,13 +169,13 @@ func TestLoginSuccessWaitsConcurrentlyAndNeedsNoURL(t *testing.T) {
 		t.Fatal(detail)
 	}
 	job = waitForJobState(t, service, job.ID, "succeeded")
-	if job.AuthorizationURL != nil || job.Error != nil {
+	if job.AuthorizationURL != nil || job.VerificationURL != nil || job.UserCode != nil || job.Error != nil {
 		t.Fatalf("job = %#v", job)
 	}
 }
 
 func TestListenerExitFailsAndReleasesProvider(t *testing.T) {
-	adapter := &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
+	adapter := &jobAdapter{name: model.ProviderClaude, start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
 		process := newControlledLogin()
 		go func() {
 			process.line("open https://example.invalid/login")
@@ -171,7 +185,7 @@ func TestListenerExitFailsAndReleasesProvider(t *testing.T) {
 	}}
 	service := openJobService(t, adapter)
 	defer service.Close()
-	job, detail := service.Jobs().StartOnboard(model.ProviderCodex, "work")
+	job, detail := service.Jobs().StartOnboard(model.ProviderClaude, "work")
 	if detail != nil {
 		t.Fatal(detail)
 	}
@@ -179,7 +193,7 @@ func TestListenerExitFailsAndReleasesProvider(t *testing.T) {
 	if job.Error == nil || job.Error.Code != teach.LoginListenerExited || job.AuthorizationURL != nil {
 		t.Fatalf("job = %#v", job)
 	}
-	if _, detail = service.Jobs().StartOnboard(model.ProviderCodex, "replacement"); detail != nil {
+	if _, detail = service.Jobs().StartOnboard(model.ProviderClaude, "replacement"); detail != nil {
 		t.Fatalf("replacement = %v", detail)
 	}
 }
@@ -196,8 +210,8 @@ func TestLoginExitClassification(t *testing.T) {
 		{name: "success with URL and credential", url: true, credential: true, state: "succeeded"},
 		{name: "nonzero with URL and credential", url: true, credential: true, exitErr: errors.New("exit 1"), state: "failed", code: teach.CredentialRejected},
 		{name: "nonzero without URL with credential", credential: true, exitErr: errors.New("exit 1"), state: "failed", code: teach.CredentialRejected},
-		{name: "zero with URL without credential", url: true, state: "failed", code: teach.LoginListenerExited},
-		{name: "nonzero with URL without credential", url: true, exitErr: errors.New("exit 1"), state: "failed", code: teach.LoginListenerExited},
+		{name: "zero with device prompt without credential", url: true, state: "failed", code: teach.CredentialMissing},
+		{name: "nonzero with device prompt without credential", url: true, exitErr: errors.New("exit 1"), state: "failed", code: teach.CredentialRejected},
 		{name: "zero without URL or credential", state: "failed", code: teach.LoginURLUnavailable},
 		{name: "nonzero without URL or credential", exitErr: errors.New("exit 1"), state: "failed", code: teach.CredentialRejected},
 	}
@@ -212,7 +226,7 @@ func TestLoginExitClassification(t *testing.T) {
 				process := newControlledLogin()
 				go func() {
 					if tt.url {
-						process.line("open https://example.invalid/login")
+						process.devicePrompt()
 					}
 					process.finish(tt.exitErr)
 				}()
@@ -233,6 +247,131 @@ func TestLoginExitClassification(t *testing.T) {
 				t.Fatalf("job = %#v", job)
 			}
 		})
+	}
+}
+
+func TestCodexDeviceAuthorizationFieldsAreTransient(t *testing.T) {
+	process := newControlledLogin()
+	adapter := &jobAdapter{start: func(home string) (provider.LoginProcess, *model.ErrorDetail) {
+		go process.devicePrompt()
+		return process, nil
+	}}
+	service := openJobService(t, adapter)
+	defer service.Close()
+	job, detail := service.Jobs().StartOnboard(model.ProviderCodex, "work")
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	job = waitForJobState(t, service, job.ID, "awaiting_user")
+	if job.AuthorizationURL != nil || job.VerificationURL == nil || *job.VerificationURL != codexVerificationURL || job.UserCode == nil || *job.UserCode != "TEST-CODE" {
+		t.Fatalf("job = %#v", job)
+	}
+	home := adapter.lastHome()
+	if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte("synthetic"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	job, detail = service.Jobs().Get(job.ID)
+	if detail != nil || job.State != "awaiting_user" {
+		t.Fatalf("credential advanced before child exit: job = %#v, detail = %#v", job, detail)
+	}
+	process.finish(nil)
+	job = waitForJobState(t, service, job.ID, "succeeded")
+	assertNoRetainedLoginPrompt(t, job, "TEST-CODE", "PRIVATE_RAW_LOGIN_SENTINEL")
+}
+
+func TestCodexDeviceAuthorizationUnavailableTeachesEnableAndRetry(t *testing.T) {
+	starts := 0
+	adapter := &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
+		starts++
+		attempt := starts
+		process := newControlledLogin()
+		go func() {
+			if attempt == 1 {
+				process.line("Error logging in with device code: device code login is not enabled for this Codex server. PRIVATE_RAW_LOGIN_SENTINEL")
+				process.finish(errors.New("exit 1"))
+				return
+			}
+			process.finish(nil)
+		}()
+		return process, nil
+	}}
+	service := openJobService(t, adapter)
+	defer service.Close()
+	job, detail := service.Jobs().StartOnboard(model.ProviderCodex, "work")
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	job = waitForJobState(t, service, job.ID, "failed")
+	if job.Error == nil || job.Error.Code != teach.DeviceAuthorizationUnavailable || len(job.Error.Prerequisites) != 2 || len(job.Error.Remedy.Calls) != 1 || job.Error.Remedy.Calls[0].Path != "/api/v1/accounts" {
+		t.Fatalf("job = %#v", job)
+	}
+	assertNoRetainedLoginPrompt(t, job, "TEST-CODE", "PRIVATE_RAW_LOGIN_SENTINEL")
+	retry, detail := service.Jobs().StartOnboard(model.ProviderCodex, "work")
+	if detail != nil {
+		t.Fatalf("retry = %#v", detail)
+	}
+	waitForJobState(t, service, retry.ID, "failed")
+}
+
+func TestCodexDeviceAuthorizationExpiryClearsCode(t *testing.T) {
+	process := newControlledLogin()
+	adapter := &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
+		go func() {
+			process.devicePrompt()
+			process.line("Error logging in with device code: device auth timed out after 15 minutes PRIVATE_RAW_LOGIN_SENTINEL")
+			process.finish(errors.New("exit 1"))
+		}()
+		return process, nil
+	}}
+	service := openJobService(t, adapter)
+	defer service.Close()
+	job, detail := service.Jobs().StartOnboard(model.ProviderCodex, "work")
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	job = waitForJobState(t, service, job.ID, "failed")
+	if job.Error == nil || job.Error.Code != teach.LoginTimeout || job.Error.Message != "The Codex device authorization code expired before login completed." {
+		t.Fatalf("job = %#v", job)
+	}
+	assertNoRetainedLoginPrompt(t, job, "TEST-CODE", "PRIVATE_RAW_LOGIN_SENTINEL")
+}
+
+func TestCodexCallbackURLIsNeverSurfaced(t *testing.T) {
+	process := newControlledLogin()
+	adapter := &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
+		go func() {
+			process.line("https://localhost:1455/auth/callback")
+			process.line("TEST-CODE")
+			process.finish(nil)
+		}()
+		return process, nil
+	}}
+	service := openJobService(t, adapter)
+	defer service.Close()
+	job, detail := service.Jobs().StartOnboard(model.ProviderCodex, "work")
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	job = waitForJobState(t, service, job.ID, "failed")
+	if job.Error == nil || job.Error.Code != teach.LoginURLUnavailable {
+		t.Fatalf("job = %#v", job)
+	}
+	assertNoRetainedLoginPrompt(t, job, "TEST-CODE", "https://localhost:1455/auth/callback")
+}
+
+func assertNoRetainedLoginPrompt(t *testing.T, job model.Job, forbidden ...string) {
+	t.Helper()
+	if job.AuthorizationURL != nil || job.VerificationURL != nil || job.UserCode != nil {
+		t.Fatalf("retained login prompt: %#v", job)
+	}
+	raw, err := json.Marshal(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range forbidden {
+		if strings.Contains(string(raw), value) {
+			t.Fatalf("retained private output %q in %s", value, raw)
+		}
 	}
 }
 
@@ -264,7 +403,7 @@ func TestRegisteredTimeoutPreservesClaimAndLaterCancel(t *testing.T) {
 	process := newControlledLogin()
 	process.terminateExit = true
 	adapter := &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
-		go process.line("open https://example.invalid/login")
+		go process.devicePrompt()
 		return process, nil
 	}}
 	service := openJobService(t, adapter)
@@ -281,7 +420,7 @@ func TestRegisteredTimeoutPreservesClaimAndLaterCancel(t *testing.T) {
 	manager.recordFailure(managed, manager.timeoutDetail(managed))
 	manager.ensureStop(managed)
 	job = waitForJobState(t, service, job.ID, "failed")
-	if job.Error == nil || job.Error.Code != teach.LoginTimeout || job.AuthorizationURL != nil || process.waits.Load() != 1 {
+	if job.Error == nil || job.Error.Code != teach.LoginTimeout || job.AuthorizationURL != nil || job.VerificationURL != nil || job.UserCode != nil || process.waits.Load() != 1 {
 		t.Fatalf("job = %#v, waits = %d", job, process.waits.Load())
 	}
 	updated := job.UpdatedAt
@@ -300,7 +439,7 @@ func TestCancelPreservesProviderCredentialAndIsIdempotent(t *testing.T) {
 		process := newControlledLogin()
 		process.terminateExit = true
 		processes = append(processes, process)
-		go process.line("open https://example.invalid/login")
+		go process.devicePrompt()
 		return process, nil
 	}}
 	service := openJobService(t, adapter)
@@ -316,7 +455,7 @@ func TestCancelPreservesProviderCredentialAndIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	job, detail = service.Jobs().Cancel(job.ID)
-	if detail != nil || job.State != "canceled" || job.Error == nil || job.Error.Code != teach.JobCanceled || job.AuthorizationURL != nil {
+	if detail != nil || job.State != "canceled" || job.Error == nil || job.Error.Code != teach.JobCanceled || job.AuthorizationURL != nil || job.VerificationURL != nil || job.UserCode != nil {
 		t.Fatalf("job = %#v, detail = %#v", job, detail)
 	}
 	after, err := os.ReadFile(filepath.Join(home, "auth.json"))
@@ -429,7 +568,7 @@ func TestReOnboardCleanupFailureRetainsAndRetryReleasesLock(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte("candidate"), 0600); err != nil {
 			t.Fatal(err)
 		}
-		go process.line("open https://example.invalid/login")
+		go process.devicePrompt()
 		return process, nil
 	}}
 	service := openJobService(t, adapter)
@@ -637,12 +776,12 @@ func TestProcessStopFailureHoldsCapacityUntilLateExit(t *testing.T) {
 	var starts atomic.Int32
 	adapter := &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
 		if starts.Add(1) == 1 {
-			go process.line("open https://example.invalid/login")
+			go process.devicePrompt()
 			return process, nil
 		}
 		replacement := newControlledLogin()
 		replacement.terminateExit = true
-		go replacement.line("open https://example.invalid/login")
+		go replacement.devicePrompt()
 		return replacement, nil
 	}}
 	service := openJobService(t, adapter)
@@ -673,7 +812,7 @@ func TestProcessStopFailureHoldsCapacityUntilLateExit(t *testing.T) {
 func TestRegisteredTimeoutStopFailureRecoversOriginalClaim(t *testing.T) {
 	process := newControlledLogin()
 	adapter := &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
-		go process.line("open https://example.invalid/login")
+		go process.devicePrompt()
 		return process, nil
 	}}
 	service := openJobService(t, adapter)
@@ -713,7 +852,7 @@ func TestRegisteredTimeoutStopFailureRecoversOriginalClaim(t *testing.T) {
 func TestCloseJoinsRegisteredProcessWithoutSecondWait(t *testing.T) {
 	process := newControlledLogin()
 	adapter := &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
-		go process.line("open https://example.invalid/login")
+		go process.devicePrompt()
 		return process, nil
 	}}
 	service := openJobService(t, adapter)

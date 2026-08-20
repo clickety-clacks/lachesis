@@ -196,7 +196,8 @@ func TestJobManagerProcessHelper(t *testing.T) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	fmt.Println("open https://example.invalid/login")
+	fmt.Println(codexVerificationURL)
+	fmt.Println("TEST-CODE")
 	<-signals
 	if err := os.WriteFile(os.Getenv("JOB_MANAGER_SIGNAL_MARKER"), []byte("interrupt\n"), 0600); err != nil {
 		fmt.Fprintln(os.Stderr, err)

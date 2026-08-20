@@ -103,12 +103,40 @@ func main() {
 		fatalf("invalid empty-registry state")
 	}
 
-	all := strings.ToLower(string(append(append(healthRaw, helpRaw...), errorRaw...)))
-	for _, forbidden := range []string{"smoke_secret_sentinel", "access_token", "refresh_token", "id_token", "authorization", "cookie"} {
-		if strings.Contains(all, forbidden) {
-			fatalf("response contains forbidden sentinel or credential field %q", forbidden)
+	for _, raw := range [][]byte{healthRaw, helpRaw, errorRaw} {
+		if strings.Contains(strings.ToLower(string(raw)), "smoke_secret_sentinel") {
+			fatalf("response contains forbidden sentinel")
+		}
+		var value any
+		if err := json.Unmarshal(raw, &value); err != nil {
+			fatalf("decode response for credential scan: %v", err)
+		}
+		if key := forbiddenResponseKey(value); key != "" {
+			fatalf("response contains forbidden credential field %q", key)
 		}
 	}
+}
+
+func forbiddenResponseKey(value any) string {
+	forbidden := map[string]bool{"access_token": true, "refresh_token": true, "id_token": true, "authorization": true, "cookie": true}
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if forbidden[strings.ToLower(key)] {
+				return key
+			}
+			if found := forbiddenResponseKey(child); found != "" {
+				return found
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if found := forbiddenResponseKey(child); found != "" {
+				return found
+			}
+		}
+	}
+	return ""
 }
 
 func get(url string, wantStatus int, dst any) []byte {

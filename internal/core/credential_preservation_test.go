@@ -357,7 +357,7 @@ func TestFailedOnboardingUnknownMarkerStatePreservesHome(t *testing.T) {
 	process := newControlledLogin()
 	adapter := testPreservationAdapter(model.ProviderCodex)
 	adapter.start = func(string) (provider.LoginProcess, *model.ErrorDetail) {
-		go process.line("open https://example.invalid/login")
+		go process.devicePrompt()
 		return process, nil
 	}
 	var events bytes.Buffer
@@ -433,7 +433,13 @@ func TestCancellationPreservesEachMarkerState(t *testing.T) {
 							t.Fatal(err)
 						}
 					}
-					go process.line("open https://example.invalid/login")
+					go func() {
+						if providerName == model.ProviderCodex {
+							process.devicePrompt()
+							return
+						}
+						process.line("open https://example.invalid/login")
+					}()
 					return process, nil
 				}
 				var events bytes.Buffer
@@ -486,7 +492,7 @@ func TestFailureCleanupOrdersExitClassificationTerminalAndIndexRelease(t *testin
 	process := newControlledLogin()
 	adapter := testPreservationAdapter(model.ProviderCodex)
 	adapter.start = func(string) (provider.LoginProcess, *model.ErrorDetail) {
-		go process.line("open https://example.invalid/login")
+		go process.devicePrompt()
 		return process, nil
 	}
 	service, detail := openService(t.TempDir(), []provider.Adapter{adapter}, idleChecker{}, io.Discard, os.Lstat)
