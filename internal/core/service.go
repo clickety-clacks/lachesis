@@ -25,12 +25,14 @@ import (
 type StoreFactory func(model.StoreBinding) (store.Adapter, error)
 
 type runtimeAccount struct {
-	mu       sync.Mutex
-	op       sync.Mutex
-	status   model.AccountStatus
-	mutation model.MutationState
-	checked  *time.Time
-	lastErr  *model.ErrorDetail
+	mu         sync.Mutex
+	op         sync.Mutex
+	usage      sync.RWMutex
+	status     model.AccountStatus
+	mutation   model.MutationState
+	checked    *time.Time
+	lastErr    *model.ErrorDetail
+	refreshErr *model.ErrorDetail
 }
 
 type Service struct {
@@ -214,7 +216,7 @@ func (s *Service) accountView(a model.RegistryAccount) model.Account {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	base := "/api/v1/accounts/" + a.ID
-	return model.Account{ID: a.ID, Label: a.Label, Provider: a.Provider, StoreKind: a.Store.Kind, Status: r.status, Working: r.status == model.StatusReady, MutationState: r.mutation, LastCheckedAt: r.checked, LastError: r.lastErr, Links: map[string]string{"verify": base + "/verify", "re_onboard": base + "/re-onboard", "usage": base + "/usage"}}
+	return model.Account{ID: a.ID, Label: a.Label, Provider: a.Provider, StoreKind: a.Store.Kind, Status: r.status, Working: r.status == model.StatusReady, MutationState: r.mutation, LastCheckedAt: r.checked, LastError: r.lastErr, RefreshError: r.refreshErr, Links: map[string]string{"verify": base + "/verify", "re_onboard": base + "/re-onboard", "usage": base + "/usage"}}
 }
 
 func (s *Service) Adopt(ctx context.Context, p model.Provider, label string, binding model.StoreBinding) (model.Account, *model.ErrorDetail) {
@@ -295,17 +297,6 @@ func (s *Service) Refresh(ctx context.Context, id string) (model.Account, *model
 	r.mutation = model.MutationRefreshing
 	r.mu.Unlock()
 	defer func() { r.mu.Lock(); r.mutation = model.MutationIdle; r.mu.Unlock() }()
-	busy, err := s.process.Busy(ctx, row.Provider)
-	if err != nil {
-		d = teach.New(teach.UpstreamUnavailable, "Provider process state cannot be inspected.", "refresh", nil, map[string]any{"provider": row.Provider}, nil, "retry the exact call")
-		s.applyError(r, d, nil)
-		return model.Account{}, d
-	}
-	if busy {
-		d = teach.New(teach.CredentialStoreBusy, "The provider CLI is running.", "refresh", nil, map[string]any{"provider": row.Provider, "mutation_state": "refreshing"}, nil, "stop the provider CLI and retry when mutation_state is idle")
-		s.applyError(r, d, nil)
-		return model.Account{}, d
-	}
 	st, err := s.stores(row.Store)
 	if err != nil {
 		return model.Account{}, s.commitError(r, err)
@@ -313,7 +304,7 @@ func (s *Service) Refresh(ctx context.Context, id string) (model.Account, *model
 	raw, err := st.Read(ctx)
 	if err != nil {
 		d = teach.New(teach.CredentialMissing, "The credential store cannot be read.", "re-onboard", nil, map[string]any{"account_id": id}, []model.RemedyCall{{Method: "POST", Path: "/api/v1/accounts/" + id + "/re-onboard"}})
-		s.applyError(r, d, nil)
+		s.applyRefreshError(r, d)
 		return model.Account{}, d
 	}
 	digest := store.DigestBytes(raw)
@@ -321,24 +312,24 @@ func (s *Service) Refresh(ctx context.Context, id string) (model.Account, *model
 	original, d := adapter.ParseCredential(raw)
 	if d != nil {
 		d = accountAwareDetail(id, d)
-		s.applyError(r, d, nil)
+		s.applyRefreshError(r, d)
 		return model.Account{}, d
 	}
 	candidate, d := adapter.Refresh(ctx, original)
 	if d != nil {
 		d = accountAwareDetail(id, d)
-		s.applyError(r, d, nil)
+		s.applyRefreshError(r, d)
 		return model.Account{}, d
 	}
 	parsed, d := adapter.ParseCredential(candidate)
 	if d != nil {
 		d = accountAwareDetail(id, d)
-		s.applyError(r, d, nil)
+		s.applyRefreshError(r, d)
 		return model.Account{}, d
 	}
 	if original.AccountID != "" && parsed.AccountID != original.AccountID {
 		d = teach.New(teach.CredentialChanged, "The refreshed credential identity changed.", "refresh", nil, map[string]any{"account_id": id}, nil, "verify, then retry refresh")
-		s.applyError(r, d, nil)
+		s.applyRefreshError(r, d)
 		return model.Account{}, d
 	}
 	if err = st.Commit(ctx, digest, candidate); err != nil {
@@ -349,7 +340,7 @@ func (s *Service) Refresh(ctx context.Context, id string) (model.Account, *model
 		} else {
 			d = teach.New(teach.CredentialCommitFailed, "The credential candidate could not be committed.", "refresh", nil, map[string]any{"store_kind": row.Store.Kind}, []model.RemedyCall{{Method: "POST", Path: "/api/v1/accounts/" + id + "/verify"}})
 		}
-		s.applyError(r, d, nil)
+		s.applyRefreshError(r, d)
 		return model.Account{}, d
 	}
 	committed, err := st.Read(ctx)
@@ -359,14 +350,14 @@ func (s *Service) Refresh(ctx context.Context, id string) (model.Account, *model
 	cred, d := adapter.ParseCredential(committed)
 	if d != nil {
 		d = accountAwareDetail(id, d)
-		s.applyError(r, d, nil)
+		s.applyRefreshError(r, d)
 		return model.Account{}, d
 	}
 	sample, d := adapter.Usage(ctx, cred)
 	now := s.now().UTC()
 	if d != nil {
 		d = accountAwareDetail(id, d)
-		s.cache.Clear(id)
+		s.cache.RecordError(id, d)
 		s.applyError(r, d, &now)
 		return model.Account{}, d
 	}
@@ -375,8 +366,10 @@ func (s *Service) Refresh(ctx context.Context, id string) (model.Account, *model
 	s.cache.Install(id, *sample)
 	r.mu.Lock()
 	r.status = model.StatusReady
+	r.mutation = model.MutationIdle
 	r.checked = &now
 	r.lastErr = nil
+	r.refreshErr = nil
 	r.mu.Unlock()
 	return s.accountView(row), nil
 }
@@ -387,6 +380,8 @@ func (s *Service) Delete(id string) *model.ErrorDetail {
 		return d
 	}
 	defer r.op.Unlock()
+	r.usage.Lock()
+	defer r.usage.Unlock()
 	r.mu.Lock()
 	mutation := r.mutation
 	r.mu.Unlock()
@@ -441,7 +436,7 @@ func (s *Service) Aggregate(ctx context.Context, mode string) (model.AggregateUs
 	for i, row := range rows {
 		go func(i int, row model.RegistryAccount) { ch <- indexed{i, s.usageResult(ctx, row, mode)} }(i, row)
 	}
-	out := model.AggregateUsage{GeneratedAt: s.now().UTC(), Results: make([]model.UsageResult, len(rows)), Counts: map[string]int{"live": 0, "cache": 0, "stale": 0, "error": 0}}
+	out := model.AggregateUsage{GeneratedAt: s.now().UTC(), Results: make([]model.UsageResult, len(rows)), Counts: map[string]int{"fresh": 0, "stale": 0, "pending": 0, "error": 0}}
 	for range rows {
 		x := <-ch
 		out.Results[x.i] = x.r
@@ -451,29 +446,70 @@ func (s *Service) Aggregate(ctx context.Context, mode string) (model.AggregateUs
 }
 
 func (s *Service) usageResult(ctx context.Context, row model.RegistryAccount, mode string) model.UsageResult {
-	sample, lastErr := s.cache.Peek(row.ID)
+	sample, lastErr, inflight := s.cache.Peek(row.ID)
 	fresh := sample != nil && sample.AgeSeconds <= 30
-	if mode == "background" && fresh {
-		return model.UsageResult{AccountID: row.ID, Status: "cache", Sample: sample}
+	if mode == "background" && fresh && !inflight && s.mutationState(row.ID) == model.MutationIdle {
+		return model.UsageResult{AccountID: row.ID, Status: "fresh", Sample: sample}
 	}
-	if mode == "background" && sample != nil {
-		go s.cache.Fetch(context.Background(), row.ID, func(ctx context.Context) (*model.UsageSample, *model.ErrorDetail) { return s.fetchAccount(ctx, row) })
-		return model.UsageResult{AccountID: row.ID, Status: "stale", Sample: sample, Error: lastErr}
+	if mode == "background" {
+		if !inflight {
+			s.cache.FetchBackground(context.Background(), row.ID, func(ctx context.Context) (*model.UsageSample, *model.ErrorDetail) { return s.fetchAccount(ctx, row) })
+		}
+		pending := s.usagePendingDetail(row.ID, sample)
+		if sample != nil {
+			if lastErr != nil {
+				pending = lastErr
+			}
+			return model.UsageResult{AccountID: row.ID, Status: "stale", Sample: sample, Error: pending}
+		}
+		return model.UsageResult{AccountID: row.ID, Status: "pending", Error: pending}
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	got, detail, started := s.cache.Fetch(waitCtx, row.ID, func(ctx context.Context) (*model.UsageSample, *model.ErrorDetail) { return s.fetchAccount(ctx, row) })
 	if got != nil && detail == nil {
-		status := "cache"
-		if started {
-			status = "live"
-		}
-		return model.UsageResult{AccountID: row.ID, Status: status, Sample: got}
+		return model.UsageResult{AccountID: row.ID, Status: "fresh", Sample: got}
+	}
+	if got != nil {
+		return model.UsageResult{AccountID: row.ID, Status: "stale", Sample: got, Error: detail}
 	}
 	if sample != nil {
 		return model.UsageResult{AccountID: row.ID, Status: "stale", Sample: sample, Error: detail}
 	}
+	if !started && (detail == nil || detail.Code == teach.UpstreamTimeout) {
+		return model.UsageResult{AccountID: row.ID, Status: "pending", Error: s.usagePendingDetail(row.ID, nil)}
+	}
 	return model.UsageResult{AccountID: row.ID, Status: "error", Error: detail}
+}
+
+func (s *Service) usagePendingDetail(id string, sample *model.UsageSample) *model.ErrorDetail {
+	state := map[string]any{"account_id": id, "usage_read": "in_progress"}
+	if sample != nil {
+		state["cache_age_seconds"] = sample.AgeSeconds
+	}
+	if mutation := s.mutationState(id); mutation != model.MutationIdle {
+		state["mutation_state"] = mutation
+	}
+	return teach.New(
+		teach.UsageRefreshPending,
+		"A fresh usage read is in progress.",
+		"usage",
+		[]model.Prerequisite{{Code: "FRESH_USAGE_AVAILABLE", Description: "Wait for the current read-only usage request to finish.", Met: false}},
+		state,
+		[]model.RemedyCall{{Method: "GET", Path: "/api/v1/accounts/" + id + "/usage?refresh=wait"}},
+	)
+}
+
+func (s *Service) mutationState(id string) model.MutationState {
+	s.mu.RLock()
+	r := s.state[id]
+	s.mu.RUnlock()
+	if r == nil {
+		return model.MutationIdle
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.mutation
 }
 
 func (s *Service) fetchDirect(ctx context.Context, row model.RegistryAccount) (*model.UsageSample, *model.ErrorDetail) {
@@ -527,8 +563,10 @@ func (s *Service) fetchAccount(ctx context.Context, row model.RegistryAccount) (
 	if r == nil {
 		return nil, teach.AccountMissing(row.ID, s.KnownIDs())
 	}
-	r.op.Lock()
-	defer r.op.Unlock()
+	// Usage reads may run beside credential refreshes, but account deletion waits
+	// for them so an in-flight read cannot outlive its registry authority.
+	r.usage.RLock()
+	defer r.usage.RUnlock()
 	sample, detail := s.fetchDirect(ctx, row)
 	now := s.now().UTC()
 	if detail != nil {
@@ -579,13 +617,18 @@ func (s *Service) applyError(r *runtimeAccount, d *model.ErrorDetail, checked *t
 		r.status = model.StatusDegraded
 	}
 }
+func (s *Service) applyRefreshError(r *runtimeAccount, d *model.ErrorDetail) {
+	r.mu.Lock()
+	r.refreshErr = d
+	r.mu.Unlock()
+}
 func (s *Service) commitError(r *runtimeAccount, err error) *model.ErrorDetail {
 	code := teach.CredentialCommitFailed
 	if errors.Is(err, store.ErrAtomicUnavailable) {
 		code = teach.KeychainAtomicCommitUnavailable
 	}
 	d := teach.New(code, "The credential store operation failed.", "refresh", nil, map[string]any{}, nil, "verify the original store")
-	s.applyError(r, d, nil)
+	s.applyRefreshError(r, d)
 	return d
 }
 func (s *Service) scheduler(ctx context.Context) {

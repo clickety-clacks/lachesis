@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +29,8 @@ type fakeAdapter struct {
 	managed     *model.StoreBinding
 	outsideHome bool
 	defaultErr  *model.ErrorDetail
+	usageFunc   func(context.Context, provider.Credential) (*model.UsageSample, *model.ErrorDetail)
+	refreshFunc func(context.Context, provider.Credential) ([]byte, *model.ErrorDetail)
 }
 
 func (a *fakeAdapter) Name() model.Provider {
@@ -59,7 +62,10 @@ func (*fakeAdapter) ParseCredential(raw []byte) (provider.Credential, *model.Err
 	}
 	return provider.Credential{Raw: append([]byte(nil), raw...)}, nil
 }
-func (a *fakeAdapter) Usage(context.Context, provider.Credential) (*model.UsageSample, *model.ErrorDetail) {
+func (a *fakeAdapter) Usage(ctx context.Context, credential provider.Credential) (*model.UsageSample, *model.ErrorDetail) {
+	if a.usageFunc != nil {
+		return a.usageFunc(ctx, credential)
+	}
 	if a.usageDetail != nil {
 		return nil, a.usageDetail
 	}
@@ -69,7 +75,10 @@ func (a *fakeAdapter) Usage(context.Context, provider.Credential) (*model.UsageS
 	}
 	return &model.UsageSample{Provider: a.Name(), ObservedAt: time.Unix(1, 0), Windows: []model.Window{{ID: "primary", Name: "Primary", UsedPercent: 10}}, Diagnostics: []model.Diagnostic{}, Raw: []byte(`{"ok":true}`)}, nil
 }
-func (*fakeAdapter) Refresh(context.Context, provider.Credential) ([]byte, *model.ErrorDetail) {
+func (a *fakeAdapter) Refresh(ctx context.Context, credential provider.Credential) ([]byte, *model.ErrorDetail) {
+	if a.refreshFunc != nil {
+		return a.refreshFunc(ctx, credential)
+	}
 	return []byte("refreshed"), nil
 }
 func (a *fakeAdapter) StartLogin(_ context.Context, home string) (provider.LoginProcess, *model.ErrorDetail) {
@@ -315,14 +324,226 @@ func TestAggregatePassesDiagnosticsAndIsolatesFatalAccount(t *testing.T) {
 	if len(aggregate.Results) != 2 || aggregate.Results[0].AccountID != degraded.ID || aggregate.Results[1].AccountID != failed.ID {
 		t.Fatalf("results = %#v", aggregate.Results)
 	}
-	if aggregate.Results[0].Status != "live" || aggregate.Results[0].Sample == nil || len(aggregate.Results[0].Sample.Diagnostics) != 1 || aggregate.Results[0].Sample.Diagnostics[0].Code != "CODEX_USAGE_WINDOW_OMITTED" {
+	if aggregate.Results[0].Status != "fresh" || aggregate.Results[0].Sample == nil || len(aggregate.Results[0].Sample.Diagnostics) != 1 || aggregate.Results[0].Sample.Diagnostics[0].Code != "CODEX_USAGE_WINDOW_OMITTED" {
 		t.Fatalf("degraded result = %#v", aggregate.Results[0])
 	}
 	if aggregate.Results[1].Status != "error" || aggregate.Results[1].Sample != nil || aggregate.Results[1].Error == nil || aggregate.Results[1].Error.Code != teach.UpstreamContractChanged {
 		t.Fatalf("failed result = %#v", aggregate.Results[1])
 	}
-	if aggregate.Counts["live"] != 1 || aggregate.Counts["error"] != 1 || aggregate.Counts["cache"] != 0 || aggregate.Counts["stale"] != 0 {
+	if aggregate.Counts["fresh"] != 1 || aggregate.Counts["error"] != 1 || aggregate.Counts["pending"] != 0 || aggregate.Counts["stale"] != 0 {
 		t.Fatalf("counts = %#v", aggregate.Counts)
+	}
+}
+
+type busyChecker struct{ calls atomic.Int32 }
+
+func (c *busyChecker) Busy(context.Context, model.Provider) (bool, error) {
+	c.calls.Add(1)
+	return true, nil
+}
+
+func adoptSyntheticAccount(t *testing.T, service *Service, adapter *fakeAdapter, label string, credential []byte) (model.Account, string) {
+	t.Helper()
+	home := t.TempDir()
+	name := adapter.credential
+	if name == "" {
+		name = "auth.json"
+	}
+	path := filepath.Join(home, name)
+	if err := os.WriteFile(path, credential, 0600); err != nil {
+		t.Fatal(err)
+	}
+	account, detail := service.Adopt(context.Background(), adapter.Name(), label, model.StoreBinding{Kind: "file", Home: home, CredentialPath: path})
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	return account, path
+}
+
+func TestUsageRunsBesideRefreshAndIgnoresUnrelatedClaudeProcess(t *testing.T) {
+	now := time.Unix(1_000, 0).UTC()
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	claude := &fakeAdapter{
+		provider:   model.ProviderClaude,
+		credential: ".credentials.json",
+		usageSample: &model.UsageSample{
+			Provider: model.ProviderClaude, ObservedAt: now,
+			Windows:     []model.Window{{ID: "five-hour", Name: "Five hour", UsedPercent: 20}},
+			Diagnostics: []model.Diagnostic{}, Raw: []byte(`{"provider":"claude"}`),
+		},
+		refreshFunc: func(context.Context, provider.Credential) ([]byte, *model.ErrorDetail) {
+			close(refreshStarted)
+			<-releaseRefresh
+			return []byte("claude-refreshed"), nil
+		},
+	}
+	codex := &fakeAdapter{
+		provider: model.ProviderCodex,
+		usageSample: &model.UsageSample{
+			Provider: model.ProviderCodex, ObservedAt: now,
+			Windows:     []model.Window{{ID: "primary", Name: "Primary", UsedPercent: 10}},
+			Diagnostics: []model.Diagnostic{}, Raw: []byte(`{"provider":"codex"}`),
+		},
+	}
+	checker := &busyChecker{}
+	service, detail := OpenService(t.TempDir(), []provider.Adapter{codex, claude}, checker)
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	defer service.Close()
+	service.SetClockForTests(func() time.Time { return now })
+	claudeAccount, _ := adoptSyntheticAccount(t, service, claude, "claude", []byte("claude-original"))
+	codexAccount, _ := adoptSyntheticAccount(t, service, codex, "codex", []byte("codex-original"))
+	service.cache.Clear(claudeAccount.ID)
+	service.cache.Clear(codexAccount.ID)
+
+	type refreshOutcome struct {
+		account model.Account
+		detail  *model.ErrorDetail
+	}
+	refreshDone := make(chan refreshOutcome, 1)
+	go func() {
+		account, detail := service.Refresh(context.Background(), claudeAccount.ID)
+		refreshDone <- refreshOutcome{account: account, detail: detail}
+	}()
+	select {
+	case <-refreshStarted:
+	case <-time.After(time.Second):
+		t.Fatal("refresh did not reach the adapter; a host-wide process guard blocked it")
+	}
+	if checker.calls.Load() != 0 {
+		t.Fatalf("provider-wide process checks = %d", checker.calls.Load())
+	}
+	if account, detail := service.Get(claudeAccount.ID); detail != nil || account.MutationState != model.MutationRefreshing || !account.Working || account.RefreshError != nil {
+		t.Fatalf("refreshing account = %#v, detail = %#v", account, detail)
+	}
+	pending, detail := service.Usage(context.Background(), claudeAccount.ID, "background")
+	if detail != nil || pending.Status != "pending" || pending.Sample != nil || pending.Error == nil || pending.Error.Code != teach.UsageRefreshPending || pending.Error.State["mutation_state"] != model.MutationRefreshing {
+		t.Fatalf("refresh-pending usage = %#v, detail = %#v", pending, detail)
+	}
+	for _, accountID := range []string{claudeAccount.ID, codexAccount.ID} {
+		result, detail := service.Usage(context.Background(), accountID, "wait")
+		if detail != nil || result.Status != "fresh" || result.Sample == nil || result.Sample.AccountID != accountID || result.Sample.AgeSeconds != 0 {
+			t.Fatalf("usage %s = %#v, detail = %#v", accountID, result, detail)
+		}
+	}
+	close(releaseRefresh)
+	outcome := <-refreshDone
+	if outcome.detail != nil || !outcome.account.Working || outcome.account.MutationState != model.MutationIdle || outcome.account.RefreshError != nil {
+		t.Fatalf("refresh outcome = %#v, detail = %#v", outcome.account, outcome.detail)
+	}
+}
+
+func TestUsageReportsFreshAndStaleWithAgeAndTeachingDetail(t *testing.T) {
+	observed := time.Unix(2_000, 0).UTC()
+	adapter := &fakeAdapter{usageSample: &model.UsageSample{
+		Provider: model.ProviderCodex, ObservedAt: observed,
+		Windows:     []model.Window{{ID: "primary", Name: "Primary", UsedPercent: 10}},
+		Diagnostics: []model.Diagnostic{}, Raw: []byte(`{"raw":"preserved"}`),
+	}}
+	service, detail := OpenService(t.TempDir(), []provider.Adapter{adapter}, idleChecker{})
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	defer service.Close()
+	now := observed.Add(10 * time.Second)
+	service.SetClockForTests(func() time.Time { return now })
+	account, _ := adoptSyntheticAccount(t, service, adapter, "codex", []byte("credential"))
+	result, detail := service.Usage(context.Background(), account.ID, "background")
+	if detail != nil || result.Status != "fresh" || result.Sample == nil || result.Sample.AgeSeconds != 10 || string(result.Sample.Raw) != `{"raw":"preserved"}` {
+		t.Fatalf("fresh result = %#v, detail = %#v", result, detail)
+	}
+
+	now = observed.Add(75 * time.Second)
+	adapter.usageDetail = teach.New(teach.UpstreamUnavailable, "Synthetic usage source is unavailable.", "usage", nil, map[string]any{"provider": model.ProviderCodex}, nil, "retry the exact call")
+	result, detail = service.Usage(context.Background(), account.ID, "wait")
+	if detail != nil || result.Status != "stale" || result.Sample == nil || result.Sample.AgeSeconds != 75 || result.Error == nil || result.Error.Code != teach.UpstreamUnavailable || result.Error.Help != "/api/v1/help/usage" {
+		t.Fatalf("stale result = %#v, detail = %#v", result, detail)
+	}
+}
+
+func TestUsagePendingCoalescesWithoutImplyingFreshness(t *testing.T) {
+	observed := time.Unix(3_000, 0).UTC()
+	adapter := &fakeAdapter{usageSample: &model.UsageSample{Provider: model.ProviderCodex, ObservedAt: observed, Windows: []model.Window{{ID: "primary", Name: "Primary", UsedPercent: 10}}, Diagnostics: []model.Diagnostic{}, Raw: []byte(`{"ok":true}`)}}
+	service, detail := OpenService(t.TempDir(), []provider.Adapter{adapter}, idleChecker{})
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	defer service.Close()
+	service.SetClockForTests(func() time.Time { return observed })
+	account, _ := adoptSyntheticAccount(t, service, adapter, "codex", []byte("credential"))
+	service.cache.Clear(account.ID)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var reads atomic.Int32
+	adapter.usageFunc = func(context.Context, provider.Credential) (*model.UsageSample, *model.ErrorDetail) {
+		if reads.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return &model.UsageSample{Provider: model.ProviderCodex, ObservedAt: observed, Windows: []model.Window{{ID: "primary", Name: "Primary", UsedPercent: 10}}, Diagnostics: []model.Diagnostic{}, Raw: []byte(`{"ok":true}`)}, nil
+	}
+	first, detail := service.Usage(context.Background(), account.ID, "background")
+	if detail != nil || first.Status != "pending" || first.Sample != nil || first.Error == nil || first.Error.Code != teach.UsageRefreshPending || first.Error.State["usage_read"] != "in_progress" {
+		t.Fatalf("first pending = %#v, detail = %#v", first, detail)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("background usage read did not start")
+	}
+	second, detail := service.Usage(context.Background(), account.ID, "background")
+	if detail != nil || second.Status != "pending" || second.Sample != nil || second.Error == nil || second.Error.Code != teach.UsageRefreshPending || reads.Load() != 1 {
+		t.Fatalf("coalesced pending = %#v, reads = %d, detail = %#v", second, reads.Load(), detail)
+	}
+	close(release)
+	deadline := time.Now().Add(time.Second)
+	for {
+		result, resultDetail := service.Usage(context.Background(), account.ID, "background")
+		if resultDetail == nil && result.Status == "fresh" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("usage did not become fresh: %#v, detail = %#v", result, resultDetail)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestExactStoreConflictPreservesExternalWriteAndUsageHealth(t *testing.T) {
+	observed := time.Unix(4_000, 0).UTC()
+	adapter := &fakeAdapter{usageSample: &model.UsageSample{Provider: model.ProviderCodex, ObservedAt: observed, Windows: []model.Window{{ID: "primary", Name: "Primary", UsedPercent: 10}}, Diagnostics: []model.Diagnostic{}, Raw: []byte(`{"ok":true}`)}}
+	service, detail := OpenService(t.TempDir(), []provider.Adapter{adapter}, idleChecker{})
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	defer service.Close()
+	service.SetClockForTests(func() time.Time { return observed })
+	account, credentialPath := adoptSyntheticAccount(t, service, adapter, "codex", []byte("original"))
+	unrelated := filepath.Join(t.TempDir(), "unrelated.json")
+	if err := os.WriteFile(unrelated, []byte("untouched"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	adapter.refreshFunc = func(context.Context, provider.Credential) ([]byte, *model.ErrorDetail) {
+		if err := os.WriteFile(credentialPath, []byte("external-writer"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return []byte("refresh-candidate"), nil
+	}
+	_, detail = service.Refresh(context.Background(), account.ID)
+	if detail == nil || detail.Code != teach.CredentialChanged {
+		t.Fatalf("refresh detail = %#v", detail)
+	}
+	if got, err := os.ReadFile(credentialPath); err != nil || string(got) != "external-writer" {
+		t.Fatalf("exact store = %q, %v", got, err)
+	}
+	if got, err := os.ReadFile(unrelated); err != nil || string(got) != "untouched" {
+		t.Fatalf("unrelated store = %q, %v", got, err)
+	}
+	view, getDetail := service.Get(account.ID)
+	if getDetail != nil || !view.Working || view.Status != model.StatusReady || view.LastError != nil || view.RefreshError == nil || view.RefreshError.Code != teach.CredentialChanged {
+		t.Fatalf("account view = %#v, detail = %#v", view, getDetail)
 	}
 }
 

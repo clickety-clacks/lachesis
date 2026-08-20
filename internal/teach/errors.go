@@ -36,6 +36,7 @@ const (
 	CLIMissing                      = "CLI_MISSING"
 	UpstreamUnavailable             = "UPSTREAM_UNAVAILABLE"
 	UpstreamTimeout                 = "UPSTREAM_TIMEOUT"
+	UsageRefreshPending             = "USAGE_REFRESH_PENDING"
 )
 
 var status = map[string]int{
@@ -55,6 +56,7 @@ var status = map[string]int{
 	KeychainSourceUnsupported:       http.StatusBadRequest,
 	UpstreamContractChanged:         http.StatusBadGateway, CLIMissing: http.StatusServiceUnavailable,
 	UpstreamUnavailable: http.StatusServiceUnavailable, UpstreamTimeout: http.StatusServiceUnavailable,
+	UsageRefreshPending: http.StatusAccepted,
 }
 
 func Status(code string) int {

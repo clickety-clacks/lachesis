@@ -124,6 +124,21 @@ func TestFileResolvesMissingCredentialThroughSymlinkedHome(t *testing.T) {
 	}
 }
 
+func TestFileRejectsCredentialOutsideCanonicalHome(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	outside := filepath.Join(dir, "outside", "auth.json")
+	if err := os.MkdirAll(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(outside), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewFile(home, outside); err == nil {
+		t.Fatal("outside credential path was accepted")
+	}
+}
+
 func TestKeychainCommitFailsClosedWithoutAtomicProof(t *testing.T) {
 	keychain, err := NewKeychain("synthetic-service", "synthetic-account")
 	if err != nil {

@@ -102,6 +102,7 @@ type Account struct {
 	MutationState MutationState     `json:"mutation_state"`
 	LastCheckedAt *time.Time        `json:"last_checked_at"`
 	LastError     *ErrorDetail      `json:"last_error"`
+	RefreshError  *ErrorDetail      `json:"refresh_error"`
 	Links         map[string]string `json:"links"`
 }
 

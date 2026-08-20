@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/clickety-clacks/lachesis/internal/model"
 )
@@ -26,6 +27,10 @@ func NewFile(home, credentialPath string) (*File, error) {
 	credentialPath, err = canonicalPath(credentialPath)
 	if err != nil {
 		return nil, err
+	}
+	rel, err := filepath.Rel(home, credentialPath)
+	if err != nil || rel == "." || rel == ".." || filepath.IsAbs(rel) || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return nil, errors.New("credential path must be inside its canonical home")
 	}
 	return &File{binding: model.StoreBinding{Kind: "file", Home: home, CredentialPath: credentialPath}}, nil
 }
