@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -13,7 +14,22 @@ var email = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
 var uuid = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 var jwt = regexp.MustCompile(`^eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$`)
 
-var sentinels = map[string]bool{"SANITIZED_EMAIL": true, "SANITIZED_USER_ID": true, "SANITIZED_ACCOUNT_ID": true, "SANITIZED_ORG_ID": true, "SANITIZED_NAME": true, "SANITIZED_TIMESTAMP": true, "SANITIZED_ACCESS_TOKEN": true, "SANITIZED_REFRESH_TOKEN": true, "SANITIZED_ID_TOKEN": true}
+const sanitizedTimestamp = "2000-01-01T00:00:00Z"
+
+var sentinels = map[string]bool{
+	"SANITIZED_EMAIL":         true,
+	"SANITIZED_USER_ID":       true,
+	"SANITIZED_ACCOUNT_ID":    true,
+	"SANITIZED_ORG_ID":        true,
+	"SANITIZED_NAME":          true,
+	"SANITIZED_PLAN":          true,
+	"SANITIZED_STRING":        true,
+	"SANITIZED_TIMESTAMP":     true,
+	"SANITIZED_ACCESS_TOKEN":  true,
+	"SANITIZED_REFRESH_TOKEN": true,
+	"SANITIZED_ID_TOKEN":      true,
+	sanitizedTimestamp:        true,
+}
 
 type Kind string
 
@@ -45,9 +61,19 @@ func sanitize(v any, kind Kind, path string) (any, error) {
 	switch x := v.(type) {
 	case map[string]any:
 		out := map[string]any{}
-		for k, v := range x {
+		keys := make([]string, 0, len(x))
+		for k := range x {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for i, k := range keys {
+			v := x[k]
 			key := strings.ToLower(k)
-			next := path + "/" + k
+			outKey := k
+			if kind == Usage && path == "/limits" {
+				outKey = fmt.Sprintf("SANITIZED_LIMIT_%03d", i+1)
+			}
+			next := path + "/" + outKey
 			if forbiddenKey.MatchString(k) {
 				if kind != Token {
 					return nil, fmt.Errorf("credential key at %s", next)
@@ -64,15 +90,23 @@ func sanitize(v any, kind Kind, path string) (any, error) {
 				}
 				continue
 			}
+			if kind == Usage {
+				y, err := sanitizeUsageValue(v, key, next)
+				if err != nil {
+					return nil, err
+				}
+				out[outKey] = y
+				continue
+			}
 			if isIdentityKey(key) {
-				out[k] = sentinelFor(key)
+				out[outKey] = sentinelFor(key)
 				continue
 			}
 			y, err := sanitize(v, kind, next)
 			if err != nil {
 				return nil, err
 			}
-			out[k] = y
+			out[outKey] = y
 		}
 		return out, nil
 	case []any:
@@ -105,6 +139,9 @@ func scan(v any, kind Kind, path string) error {
 					return fmt.Errorf("unsafe credential key at %s", next)
 				}
 			}
+			if kind == Usage && path == "/limits" && !strings.HasPrefix(k, "SANITIZED_LIMIT_") {
+				return fmt.Errorf("unsafe usage limit key at %s", next)
+			}
 			if err := scan(v, kind, next); err != nil {
 				return err
 			}
@@ -119,11 +156,67 @@ func scan(v any, kind Kind, path string) error {
 		if sentinels[x] {
 			return nil
 		}
+		if kind == Usage {
+			return fmt.Errorf("unsafe usage string at %s", path)
+		}
 		if jwt.MatchString(x) || email.MatchString(x) || uuid.MatchString(x) {
 			return fmt.Errorf("unsafe value at %s", path)
 		}
+	case float64:
+		if kind == Usage {
+			key := strings.ToLower(path[strings.LastIndex(path, "/")+1:])
+			want := 1.0
+			switch key {
+			case "used_percent":
+				want = 25
+			case "utilization":
+				want = 0.25
+			}
+			if x != want {
+				return fmt.Errorf("unsafe usage number at %s", path)
+			}
+		}
 	}
 	return nil
+}
+
+func sanitizeUsageValue(v any, key, path string) (any, error) {
+	switch x := v.(type) {
+	case map[string]any, []any:
+		return sanitize(x, Usage, path)
+	case string:
+		switch {
+		case strings.Contains(key, "timestamp") || strings.HasSuffix(key, "_at"):
+			return sanitizedTimestamp, nil
+		case strings.Contains(key, "email"):
+			return "SANITIZED_EMAIL", nil
+		case strings.Contains(key, "account"):
+			return "SANITIZED_ACCOUNT_ID", nil
+		case strings.Contains(key, "organization"):
+			return "SANITIZED_ORG_ID", nil
+		case strings.Contains(key, "user_id"):
+			return "SANITIZED_USER_ID", nil
+		case key == "name":
+			return "SANITIZED_NAME", nil
+		case strings.Contains(key, "plan"):
+			return "SANITIZED_PLAN", nil
+		default:
+			return "SANITIZED_STRING", nil
+		}
+	case float64:
+		switch key {
+		case "used_percent":
+			return float64(25), nil
+		case "utilization":
+			return 0.25, nil
+		default:
+			return float64(1), nil
+		}
+	case bool, nil:
+		return x, nil
+	default:
+		return nil, fmt.Errorf("unsupported usage value at %s", path)
+	}
 }
 func isIdentityKey(k string) bool {
 	return strings.Contains(k, "email") || strings.Contains(k, "user_id") || strings.Contains(k, "account_id") || strings.Contains(k, "organization_id") || k == "name" || strings.Contains(k, "timestamp") || strings.HasSuffix(k, "_at")

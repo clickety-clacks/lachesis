@@ -35,6 +35,9 @@ func TestSanitizedRealUsageFixtures(t *testing.T) {
 		if detail != nil || sample == nil || string(sample.Raw) != string(fixture.Response) {
 			t.Fatalf("normalize fixture %s: sample=%#v detail=%#v", path, sample, detail)
 		}
+		if len(sample.Windows) == 0 || len(sample.Diagnostics) == 0 {
+			t.Fatalf("fixture %s did not exercise valid-window retention with additional-window degradation: windows=%d diagnostics=%d", path, len(sample.Windows), len(sample.Diagnostics))
+		}
 		count++
 	}
 	if count == 0 {

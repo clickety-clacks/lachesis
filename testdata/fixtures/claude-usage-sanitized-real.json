@@ -1,0 +1,109 @@
+{
+  "provider": "claude",
+  "endpoint": "usage",
+  "capture_date": "2000-01-01",
+  "sanitizer_version": "2",
+  "real_response": true,
+  "kind": "usage",
+  "response": {
+    "amber_ladder": null,
+    "cinder_cove": null,
+    "extra_usage": {
+      "credits_ever_enabled": true,
+      "currency": null,
+      "daily": null,
+      "decimal_places": null,
+      "disabled_reason": null,
+      "is_enabled": false,
+      "monthly_limit": null,
+      "spend_limit_reached": false,
+      "used_credits": null,
+      "user_disabled": true,
+      "utilization": null,
+      "weekly": null
+    },
+    "five_hour": {
+      "limit_dollars": null,
+      "remaining_dollars": null,
+      "resets_at": null,
+      "used_dollars": null,
+      "utilization": 0.25
+    },
+    "iguana_necktie": null,
+    "limits": [
+      {
+        "group": "SANITIZED_STRING",
+        "is_active": false,
+        "kind": "SANITIZED_STRING",
+        "percent": 1,
+        "resets_at": null,
+        "scope": null,
+        "severity": "SANITIZED_STRING"
+      },
+      {
+        "group": "SANITIZED_STRING",
+        "is_active": false,
+        "kind": "SANITIZED_STRING",
+        "percent": 1,
+        "resets_at": "2000-01-01T00:00:00Z",
+        "scope": null,
+        "severity": "SANITIZED_STRING"
+      },
+      {
+        "group": "SANITIZED_STRING",
+        "is_active": true,
+        "kind": "SANITIZED_STRING",
+        "percent": 1,
+        "resets_at": "2000-01-01T00:00:00Z",
+        "scope": {
+          "model": {
+            "display_name": "SANITIZED_STRING",
+            "id": null
+          },
+          "surface": null
+        },
+        "severity": "SANITIZED_STRING"
+      }
+    ],
+    "member_dashboard_available": false,
+    "nimbus_quill": {
+      "limit_dollars": null,
+      "remaining_dollars": null,
+      "resets_at": null,
+      "used_dollars": null,
+      "utilization": 0.25
+    },
+    "omelette_promotional": null,
+    "seven_day": {
+      "limit_dollars": null,
+      "remaining_dollars": null,
+      "resets_at": "2000-01-01T00:00:00Z",
+      "used_dollars": null,
+      "utilization": 0.25
+    },
+    "seven_day_cowork": null,
+    "seven_day_oauth_apps": null,
+    "seven_day_omelette": null,
+    "seven_day_opus": null,
+    "seven_day_sonnet": null,
+    "spend": {
+      "auto_reload": null,
+      "balance": null,
+      "can_purchase_credits": false,
+      "can_toggle": false,
+      "cap": null,
+      "disabled_reason": null,
+      "disclaimer": "SANITIZED_STRING",
+      "enabled": false,
+      "limit": null,
+      "percent": 1,
+      "severity": "SANITIZED_STRING",
+      "used": {
+        "amount_minor": 1,
+        "currency": "SANITIZED_STRING",
+        "exponent": 1
+      }
+    },
+    "tangelo": null
+  }
+}
