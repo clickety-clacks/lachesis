@@ -25,6 +25,6 @@ var topics = map[string]helpTopic{
 	"jobs":       {"jobs", "Inspect or cancel a login job. JOB_PROCESS_STOP_FAILED and CREDENTIAL_CLEANUP_PENDING retain the active lock; retry cancellation after fixing the reported condition.", nil, []helpExample{{"Inspect job", "GET", "/api/v1/jobs/{id}", nil}, {"Cancel or retry cleanup", "POST", "/api/v1/jobs/{id}/cancel", nil}}},
 	"verify":     {"verify", "Check current credential and usage without inference.", []helpPrereq{{"ACCOUNT_EXISTS", "Use a registered account ID."}}, []helpExample{{"Verify", "POST", "/api/v1/accounts/{id}/verify", nil}}},
 	"re-onboard": {"re-onboard", "Replace a known account credential through browser login.", []helpPrereq{{"ACCOUNT_EXISTS", "Use a registered account ID."}}, []helpExample{{"Re-onboard", "POST", "/api/v1/accounts/{id}/re-onboard", nil}}},
-	"refresh":    {"refresh", "Refresh, commit, and verify a credential.", []helpPrereq{{"CLI_QUIESCENT", "Stop the matching provider CLI."}}, []helpExample{{"Refresh", "POST", "/api/v1/accounts/{id}/refresh", nil}}},
+	"refresh":    {"refresh", "Refresh, commit, and verify a credential.", nil, []helpExample{{"Refresh", "POST", "/api/v1/accounts/{id}/refresh", nil}}},
 	"health":     {"health", "Inspect service, provider, and account health.", nil, []helpExample{{"Health", "GET", "/api/v1/health", nil}}},
 }

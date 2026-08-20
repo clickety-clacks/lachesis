@@ -76,10 +76,7 @@ func (c *Cache) Fetch(ctx context.Context, id string, fetch func(context.Context
 	done := e.inflight
 	c.mu.Unlock()
 	s, detail := fetch(ctx)
-	c.finish(id, done, s, detail)
-	if s != nil {
-		s = aged(s, c.now())
-	}
+	s, detail = c.finish(id, done, s, detail)
 	return s, detail, true
 }
 
@@ -95,28 +92,27 @@ func (c *Cache) FetchBackground(ctx context.Context, id string, fetch func(conte
 	c.mu.Unlock()
 	go func() {
 		s, detail := fetch(ctx)
-		c.finish(id, done, s, detail)
+		_, _ = c.finish(id, done, s, detail)
 	}()
 	return true
 }
 
-func (c *Cache) finish(id string, done chan struct{}, s *model.UsageSample, detail *model.ErrorDetail) {
+func (c *Cache) finish(id string, done chan struct{}, s *model.UsageSample, detail *model.ErrorDetail) (*model.UsageSample, *model.ErrorDetail) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	e := c.entry(id)
-	if e.inflight != done {
-		c.mu.Unlock()
-		return
+	if e.inflight == done {
+		if s != nil {
+			copy := *s
+			e.sample = &copy
+			e.err = nil
+		} else {
+			e.err = detail
+		}
+		e.inflight = nil
+		close(done)
 	}
-	if s != nil {
-		copy := *s
-		e.sample = &copy
-		e.err = nil
-	} else {
-		e.err = detail
-	}
-	e.inflight = nil
-	close(done)
-	c.mu.Unlock()
+	return aged(e.sample, c.now()), e.err
 }
 
 func (c *Cache) entry(id string) *cacheEntry {

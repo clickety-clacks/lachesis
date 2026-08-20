@@ -511,6 +511,46 @@ func TestUsagePendingCoalescesWithoutImplyingFreshness(t *testing.T) {
 	}
 }
 
+func TestUsageWaitReturnsInstalledWinnerWhenReadIsSuperseded(t *testing.T) {
+	observed := time.Unix(3_500, 0).UTC()
+	adapter := &fakeAdapter{usageSample: &model.UsageSample{Provider: model.ProviderCodex, ObservedAt: observed, Windows: []model.Window{{ID: "primary", Name: "Primary", UsedPercent: 10}}, Diagnostics: []model.Diagnostic{}, Raw: []byte(`{"value":"initial"}`)}}
+	service, detail := OpenService(t.TempDir(), []provider.Adapter{adapter}, idleChecker{})
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	defer service.Close()
+	service.SetClockForTests(func() time.Time { return observed })
+	account, _ := adoptSyntheticAccount(t, service, adapter, "codex", []byte("credential"))
+	service.cache.Clear(account.ID)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	adapter.usageFunc = func(context.Context, provider.Credential) (*model.UsageSample, *model.ErrorDetail) {
+		close(started)
+		<-release
+		return &model.UsageSample{Provider: model.ProviderCodex, ObservedAt: observed, Windows: []model.Window{{ID: "primary", Name: "Primary", UsedPercent: 20}}, Diagnostics: []model.Diagnostic{}, Raw: []byte(`{"value":"superseded"}`)}, nil
+	}
+	type outcome struct {
+		result model.UsageResult
+		detail *model.ErrorDetail
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		result, detail := service.Usage(context.Background(), account.ID, "wait")
+		done <- outcome{result: result, detail: detail}
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("usage read did not start")
+	}
+	service.cache.Install(account.ID, model.UsageSample{AccountID: account.ID, Provider: model.ProviderCodex, ObservedAt: observed, Windows: []model.Window{{ID: "primary", Name: "Primary", UsedPercent: 30}}, Diagnostics: []model.Diagnostic{}, Raw: []byte(`{"value":"winner"}`)})
+	close(release)
+	got := <-done
+	if got.detail != nil || got.result.Status != "fresh" || got.result.Sample == nil || string(got.result.Sample.Raw) != `{"value":"winner"}` {
+		t.Fatalf("usage result = %#v, detail = %#v", got.result, got.detail)
+	}
+}
+
 func TestExactStoreConflictPreservesExternalWriteAndUsageHealth(t *testing.T) {
 	observed := time.Unix(4_000, 0).UTC()
 	adapter := &fakeAdapter{usageSample: &model.UsageSample{Provider: model.ProviderCodex, ObservedAt: observed, Windows: []model.Window{{ID: "primary", Name: "Primary", UsedPercent: 10}}, Diagnostics: []model.Diagnostic{}, Raw: []byte(`{"ok":true}`)}}

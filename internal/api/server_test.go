@@ -183,3 +183,10 @@ func TestJobsHelpDescribesCancelAndHeldLocks(t *testing.T) {
 		t.Fatalf("topic = %#v", topic)
 	}
 }
+
+func TestRefreshHelpHasNoCLIQuiescentPrerequisite(t *testing.T) {
+	topic := topics["refresh"]
+	if len(topic.Prerequisites) != 0 {
+		t.Fatalf("topic = %#v", topic)
+	}
+}
