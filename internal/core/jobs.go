@@ -52,7 +52,7 @@ type managedJob struct {
 	workerDone     chan struct{}
 	stopRunning    bool
 	stopDone       chan struct{}
-	scratch        string
+	cleanup        cleanupTarget
 	expected       string
 	accountRuntime *runtimeAccount
 }
@@ -281,19 +281,19 @@ func (j *JobManager) runOnboard(ctx context.Context, job *managedJob, accountID,
 	}
 	home := filepath.Join(j.service.stateDir, "providers", string(job.model.Provider), accountID)
 	if err := os.MkdirAll(home, 0700); err != nil {
-		j.finishStart(job, nil, home, "")
+		j.finishStart(job, nil, providerHomeCleanupTarget{provider: job.model.Provider, home: home}, "")
 		j.failJob(job, teach.New(teach.CredentialCleanupPending, "The managed store could not be created.", "onboard", nil, map[string]any{"managed_path": home}, nil, "retry onboarding"))
 		return
 	}
 	adapter := j.service.adapters[job.model.Provider]
 	binding := adapter.ManagedBinding(home)
 	if detail := validManagedBinding(job.model.Provider, label, home, binding); detail != nil {
-		j.finishStart(job, nil, home, binding.CredentialPath)
+		j.finishStart(job, nil, providerHomeCleanupTarget{provider: job.model.Provider, home: home}, binding.CredentialPath)
 		j.failJob(job, detail)
 		return
 	}
 	proc, detail := adapter.StartLogin(ctx, home)
-	claimed := j.finishStart(job, proc, home, binding.CredentialPath)
+	claimed := j.finishStart(job, proc, providerHomeCleanupTarget{provider: job.model.Provider, home: home}, binding.CredentialPath)
 	if proc == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		j.recordFailure(job, j.timeoutDetail(job))
 		claimed = true
@@ -369,25 +369,25 @@ func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row mode
 	}
 	tx := filepath.Join(j.service.stateDir, "transactions", job.model.ID)
 	if err := os.MkdirAll(tx, 0700); err != nil {
-		j.finishStart(job, nil, tx, "")
+		j.finishStart(job, nil, transactionCleanupTarget{path: tx}, "")
 		j.failJob(job, teach.New(teach.CredentialCleanupPending, "The transaction directory could not be created.", "re-onboard", nil, nil, nil, "retry re-onboarding"))
 		return
 	}
 	busy, err := j.service.process.Busy(ctx, row.Provider)
 	if err != nil || busy {
-		j.finishStart(job, nil, tx, "")
+		j.finishStart(job, nil, transactionCleanupTarget{path: tx}, "")
 		j.failJob(job, teach.New(teach.CredentialStoreBusy, "The provider CLI is running or cannot be inspected.", "re-onboard", nil, map[string]any{"provider": row.Provider}, nil, "stop the provider CLI and retry when mutation_state is idle"))
 		return
 	}
 	adapter := j.service.adapters[row.Provider]
 	binding := adapter.ManagedBinding(tx)
 	if detail := validManagedBinding(job.model.Provider, row.Label, tx, binding); detail != nil {
-		j.finishStart(job, nil, tx, binding.CredentialPath)
+		j.finishStart(job, nil, transactionCleanupTarget{path: tx}, binding.CredentialPath)
 		j.failJob(job, detail)
 		return
 	}
 	proc, detail := adapter.StartLogin(ctx, tx)
-	claimed := j.finishStart(job, proc, tx, binding.CredentialPath)
+	claimed := j.finishStart(job, proc, transactionCleanupTarget{path: tx}, binding.CredentialPath)
 	if proc == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		j.recordFailure(job, j.timeoutDetail(job))
 		claimed = true
@@ -464,7 +464,7 @@ func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row mode
 		return
 	}
 	j.service.cache.Install(row.ID, *sample)
-	if err := j.removeScratchOnce(tx); err != nil {
+	if err := j.removeTransactionOnce(transactionCleanupTarget{path: tx}); err != nil {
 		j.recordFailure(job, teach.New(teach.CredentialCleanupPending, "The re-onboard transaction could not be removed.", "jobs", nil, map[string]any{"job_id": job.model.ID, "transaction_path": tx}, j.jobRemedyCalls(job)))
 		stopDetail := j.cleanupPendingDetail(job, tx)
 		j.mu.Lock()
@@ -495,9 +495,9 @@ func (j *JobManager) beginStart(job *managedJob) bool {
 	return true
 }
 
-func (j *JobManager) finishStart(job *managedJob, proc provider.LoginProcess, scratch, expected string) bool {
+func (j *JobManager) finishStart(job *managedJob, proc provider.LoginProcess, cleanup cleanupTarget, expected string) bool {
 	j.mu.Lock()
-	job.scratch = scratch
+	job.cleanup = cleanup
 	job.expected = expected
 	if proc == nil {
 		job.lifecycle = processExited
@@ -724,16 +724,17 @@ func (j *JobManager) stopAndFinalize(job *managedJob) *model.ErrorDetail {
 	}
 	j.mu.RLock()
 	claim := job.claim
-	scratch := job.scratch
-	kind := job.model.Kind
+	cleanup := job.cleanup
 	j.mu.RUnlock()
 	if claim == nil {
 		return nil
 	}
-	removeScratch := kind == "re_onboard" || claim.state == "failed"
-	if removeScratch && scratch != "" {
-		if err := j.removeScratchOnce(scratch); err != nil {
-			return j.cleanupPendingDetail(job, scratch)
+	switch target := cleanup.(type) {
+	case providerHomeCleanupTarget:
+		j.service.preserveProviderHome(target)
+	case transactionCleanupTarget:
+		if err := j.removeTransactionOnce(target); err != nil {
+			return j.cleanupPendingDetail(job, target.path)
 		}
 	}
 	j.mu.Lock()
@@ -756,11 +757,11 @@ func waitFor(done <-chan struct{}, duration time.Duration) bool {
 	}
 }
 
-func (j *JobManager) removeScratchOnce(path string) error {
-	if err := j.removeAll(path); err != nil {
+func (j *JobManager) removeTransactionOnce(target transactionCleanupTarget) error {
+	if err := j.removeAll(target.path); err != nil {
 		return err
 	}
-	if _, err := j.stat(path); !errors.Is(err, os.ErrNotExist) {
+	if _, err := j.stat(target.path); !errors.Is(err, os.ErrNotExist) {
 		if err == nil {
 			return fmt.Errorf("path remains after removal")
 		}

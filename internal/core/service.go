@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,14 +45,21 @@ type Service struct {
 	jobs     *JobManager
 	now      func() time.Time
 	cancel   context.CancelFunc
+	eventMu  sync.Mutex
+	events   io.Writer
+	lstat    func(string) (os.FileInfo, error)
 }
 
 func OpenService(stateDir string, adapters []provider.Adapter, checker processcheck.Checker) (*Service, *model.ErrorDetail) {
+	return openService(stateDir, adapters, checker, os.Stderr, os.Lstat)
+}
+
+func openService(stateDir string, adapters []provider.Adapter, checker processcheck.Checker, events io.Writer, lstat func(string) (os.FileInfo, error)) (*Service, *model.ErrorDetail) {
 	reg, err := OpenRegistry(stateDir)
 	if err != nil {
 		return nil, teach.New(teach.RegistryCommitFailed, "The registry cannot be opened.", "health", nil, map[string]any{"registry_path": filepath.Join(stateDir, "accounts.json")}, nil, "fix the registry before restart")
 	}
-	s := &Service{stateDir: stateDir, registry: reg, cache: NewCache(), adapters: map[model.Provider]provider.Adapter{}, process: checker, state: map[string]*runtimeAccount{}, now: time.Now}
+	s := &Service{stateDir: stateDir, registry: reg, cache: NewCache(), adapters: map[model.Provider]provider.Adapter{}, process: checker, state: map[string]*runtimeAccount{}, now: time.Now, events: events, lstat: lstat}
 	for _, a := range adapters {
 		s.adapters[a.Name()] = a
 	}
@@ -148,9 +156,7 @@ func (s *Service) reconcile() *model.ErrorDetail {
 			}
 			path := filepath.Join(root, e.Name())
 			if !known[path] {
-				if err = os.RemoveAll(path); err != nil {
-					return cleanupDetail(path)
-				}
+				s.preserveProviderHome(providerHomeCleanupTarget{provider: p, home: path})
 			}
 		}
 	}
