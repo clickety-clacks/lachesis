@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +44,7 @@ type managedJob struct {
 	outputDone     chan outputResult
 	claim          *terminalClaim
 	commitClaim    bool
+	codeSubmitted  bool
 	terminalDone   chan struct{}
 	workerDone     chan struct{}
 	stopRunning    bool
@@ -173,6 +175,48 @@ func (j *JobManager) Cancel(id string) (model.Job, *model.ErrorDetail) {
 	}
 	j.mu.RUnlock()
 	return result, nil
+}
+
+func (j *JobManager) SubmitCode(id, code string) *model.ErrorDetail {
+	if strings.TrimSpace(code) == "" || strings.ContainsAny(code, "\r\n") {
+		return teach.New(teach.InvalidRequest, "Send one non-empty authorization code without a line break.", "jobs", nil, nil, nil)
+	}
+	j.mu.Lock()
+	job := j.jobs[id]
+	if job == nil {
+		j.mu.Unlock()
+		return j.jobNotFound(id)
+	}
+	active := j.activeProvider[model.ProviderClaude] == id
+	if job.model.AccountID != nil {
+		active = j.activeAccount[*job.model.AccountID] == id
+	}
+	submitter, canSubmit := job.process.(provider.CodeSubmitter)
+	switch {
+	case job.model.Provider != model.ProviderClaude:
+		detail := j.codeSubmissionDetail(job, "provider_mismatch")
+		j.mu.Unlock()
+		return detail
+	case job.codeSubmitted:
+		detail := j.codeSubmissionDetail(job, "code_already_submitted")
+		j.mu.Unlock()
+		return detail
+	case !active || job.model.State != "awaiting_user" || job.lifecycle != processRegistered || job.claim != nil || job.commitClaim || !canSubmit:
+		detail := j.codeSubmissionDetail(job, "job_not_awaiting_code")
+		j.mu.Unlock()
+		return detail
+	}
+	// Reserve the only delivery while the exact active process and state are
+	// locked, then release the manager before the external stdin write.
+	job.codeSubmitted = true
+	j.mu.Unlock()
+	if err := submitter.SubmitCode(code); err != nil {
+		j.mu.RLock()
+		detail := j.codeSubmissionDetail(job, "process_did_not_accept_code")
+		j.mu.RUnlock()
+		return detail
+	}
+	return nil
 }
 
 func (j *JobManager) StartOnboard(p model.Provider, label string) (model.Job, *model.ErrorDetail) {
@@ -890,6 +934,12 @@ func (j *JobManager) activeDetail(id string) *model.ErrorDetail {
 
 func (j *JobManager) jobNotFound(id string) *model.ErrorDetail {
 	return teach.New(teach.JobNotFound, "The job does not exist or its retention period ended.", "onboard", nil, map[string]any{"job_id": id}, nil, "start the original onboarding call again")
+}
+
+func (j *JobManager) codeSubmissionDetail(job *managedJob, reason string) *model.ErrorDetail {
+	return teach.New(teach.JobCodeNotAccepted, "The authorization code was not accepted for this job.", "jobs", nil,
+		map[string]any{"job_id": job.model.ID, "provider": job.model.Provider, "job_state": job.model.State, "reason": reason},
+		[]model.RemedyCall{{Method: "GET", Path: "/api/v1/jobs/" + job.model.ID}})
 }
 
 func (j *JobManager) listenerExitedDetail(job *managedJob) *model.ErrorDetail {

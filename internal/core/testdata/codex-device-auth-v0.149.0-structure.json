@@ -1,0 +1,6 @@
+{
+  "synthetic": true,
+  "observed_structure": "ANSI-colored numbered prose with the official URL before the one-time code",
+  "output": "release BUILD-ALPHA\n1. Open the verification address: \u001b[1;94mhttps://auth.openai.com/codex/device\u001b[0m\n2. Enter the one-time code: \u001b[38;5;245mAB12-C345D\u001b[0m\n",
+  "expected_code": "AB12-C345D"
+}

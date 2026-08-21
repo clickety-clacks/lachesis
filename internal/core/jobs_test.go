@@ -29,11 +29,17 @@ type controlledLogin struct {
 	waits         atomic.Int32
 	terminates    atomic.Int32
 	kills         atomic.Int32
+	submits       atomic.Int32
+	submitted     chan string
+	submitErr     error
+	submitStarted chan struct{}
+	submitRelease chan struct{}
+	submitOnce    sync.Once
 }
 
 func newControlledLogin() *controlledLogin {
 	r, w := io.Pipe()
-	return &controlledLogin{reader: r, writer: w, exit: make(chan error, 1)}
+	return &controlledLogin{reader: r, writer: w, exit: make(chan error, 1), submitted: make(chan string, 1)}
 }
 
 func (p *controlledLogin) Output() io.ReadCloser { return p.reader }
@@ -55,6 +61,20 @@ func (p *controlledLogin) Kill() error {
 	if p.killExit {
 		p.finish(errors.New("killed"))
 	}
+	return nil
+}
+func (p *controlledLogin) SubmitCode(code string) error {
+	p.submits.Add(1)
+	if p.submitStarted != nil {
+		p.submitOnce.Do(func() { close(p.submitStarted) })
+	}
+	if p.submitRelease != nil {
+		<-p.submitRelease
+	}
+	if p.submitErr != nil {
+		return p.submitErr
+	}
+	p.submitted <- code
 	return nil
 }
 func (p *controlledLogin) finish(err error) { p.exitOnce.Do(func() { p.exit <- err }) }
@@ -385,6 +405,264 @@ func TestCodexDeviceAuthorizationFieldsAreTransient(t *testing.T) {
 	process.finish(nil)
 	job = waitForJobState(t, service, job.ID, "succeeded")
 	assertNoRetainedLoginPrompt(t, job, "TEST-CODE", "PRIVATE_RAW_LOGIN_SENTINEL")
+}
+
+func TestClaudeAuthorizationCodeIsWrittenOnceWithoutRetention(t *testing.T) {
+	process := newControlledLogin()
+	process.terminateExit = true
+	adapter := &jobAdapter{name: model.ProviderClaude, start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
+		go process.line("open https://example.invalid/login")
+		return process, nil
+	}}
+	service := openJobService(t, adapter)
+	defer service.Close()
+	job, detail := service.Jobs().StartOnboard(model.ProviderClaude, "work")
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	job = waitForJobState(t, service, job.ID, "awaiting_user")
+	const code = "SYNTHETIC-AUTHORIZATION-CODE"
+	if detail = service.Jobs().SubmitCode(job.ID, code); detail != nil {
+		t.Fatal(detail)
+	}
+	select {
+	case got := <-process.submitted:
+		if got != code {
+			t.Fatal("submitted code changed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("authorization code was not submitted")
+	}
+	if detail = service.Jobs().SubmitCode(job.ID, code); detail == nil || detail.Code != teach.JobCodeNotAccepted || detail.State["reason"] != "code_already_submitted" {
+		t.Fatalf("duplicate detail = %#v", detail)
+	}
+	if process.submits.Load() != 1 {
+		t.Fatalf("submissions = %d", process.submits.Load())
+	}
+	current, detail := service.Jobs().Get(job.ID)
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	raw, err := json.Marshal(current)
+	if err != nil || strings.Contains(string(raw), code) {
+		t.Fatalf("job retained submitted input: %s, %v", raw, err)
+	}
+	if _, detail = service.Jobs().Cancel(job.ID); detail != nil {
+		t.Fatal(detail)
+	}
+}
+
+func TestAuthorizationCodeSubmissionRejectsWrongJobAndLateRetry(t *testing.T) {
+	process := newControlledLogin()
+	process.terminateExit = true
+	adapter := &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
+		go process.devicePrompt()
+		return process, nil
+	}}
+	service := openJobService(t, adapter)
+	defer service.Close()
+	job, detail := service.Jobs().StartOnboard(model.ProviderCodex, "work")
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	waitForJobState(t, service, job.ID, "awaiting_user")
+	if detail = service.Jobs().SubmitCode(job.ID, "SYNTHETIC-CODE"); detail == nil || detail.Code != teach.JobCodeNotAccepted || detail.State["reason"] != "provider_mismatch" {
+		t.Fatalf("Codex detail = %#v", detail)
+	}
+	if _, detail = service.Jobs().Cancel(job.ID); detail != nil {
+		t.Fatal(detail)
+	}
+	if detail = service.Jobs().SubmitCode(job.ID, "SYNTHETIC-CODE"); detail == nil || detail.Code != teach.JobCodeNotAccepted || detail.State["reason"] != "provider_mismatch" {
+		t.Fatalf("late detail = %#v", detail)
+	}
+	if process.submits.Load() != 0 {
+		t.Fatalf("submissions = %d", process.submits.Load())
+	}
+}
+
+func TestClaudeAuthorizationCodeSubmissionRejectsCanceledJob(t *testing.T) {
+	process := newControlledLogin()
+	process.terminateExit = true
+	adapter := &jobAdapter{name: model.ProviderClaude, start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
+		go process.line("open https://example.invalid/login")
+		return process, nil
+	}}
+	service := openJobService(t, adapter)
+	defer service.Close()
+	job, detail := service.Jobs().StartOnboard(model.ProviderClaude, "work")
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	waitForJobState(t, service, job.ID, "awaiting_user")
+	if _, detail = service.Jobs().Cancel(job.ID); detail != nil {
+		t.Fatal(detail)
+	}
+	if detail = service.Jobs().SubmitCode(job.ID, "SYNTHETIC-CODE"); detail == nil || detail.Code != teach.JobCodeNotAccepted || detail.State["reason"] != "job_not_awaiting_code" {
+		t.Fatalf("late detail = %#v", detail)
+	}
+	if process.submits.Load() != 0 {
+		t.Fatalf("submissions = %d", process.submits.Load())
+	}
+}
+
+func TestClaudeAuthorizationCodeSubmissionDoesNotRetryWriteFailure(t *testing.T) {
+	process := newControlledLogin()
+	process.terminateExit = true
+	process.submitErr = errors.New("synthetic closed stdin")
+	adapter := &jobAdapter{name: model.ProviderClaude, start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
+		go process.line("open https://example.invalid/login")
+		return process, nil
+	}}
+	service := openJobService(t, adapter)
+	defer service.Close()
+	job, detail := service.Jobs().StartOnboard(model.ProviderClaude, "work")
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	waitForJobState(t, service, job.ID, "awaiting_user")
+	if detail = service.Jobs().SubmitCode(job.ID, "SYNTHETIC-CODE"); detail == nil || detail.Code != teach.JobCodeNotAccepted || detail.State["reason"] != "process_did_not_accept_code" {
+		t.Fatalf("write detail = %#v", detail)
+	}
+	if detail = service.Jobs().SubmitCode(job.ID, "SYNTHETIC-CODE"); detail == nil || detail.State["reason"] != "code_already_submitted" {
+		t.Fatalf("retry detail = %#v", detail)
+	}
+	if process.submits.Load() != 1 {
+		t.Fatalf("submissions = %d", process.submits.Load())
+	}
+	if _, detail = service.Jobs().Cancel(job.ID); detail != nil {
+		t.Fatal(detail)
+	}
+}
+
+func TestClaudeAuthorizationCodeSubmissionDoesNotBlockCancelOrTimeout(t *testing.T) {
+	tests := []struct {
+		name      string
+		terminate func(*JobManager, *managedJob) <-chan *model.ErrorDetail
+		state     string
+		code      string
+	}{
+		{
+			name: "cancel",
+			terminate: func(manager *JobManager, job *managedJob) <-chan *model.ErrorDetail {
+				done := make(chan *model.ErrorDetail, 1)
+				go func() { _, detail := manager.Cancel(job.model.ID); done <- detail }()
+				return done
+			},
+			state: "canceled",
+			code:  teach.JobCanceled,
+		},
+		{
+			name: "timeout",
+			terminate: func(manager *JobManager, job *managedJob) <-chan *model.ErrorDetail {
+				done := make(chan *model.ErrorDetail, 1)
+				go func() {
+					manager.recordFailure(job, manager.timeoutDetail(job))
+					manager.ensureStop(job)
+					<-job.workerDone
+					done <- nil
+				}()
+				return done
+			},
+			state: "failed",
+			code:  teach.LoginTimeout,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			process := newControlledLogin()
+			process.terminateExit = true
+			process.submitStarted = make(chan struct{})
+			process.submitRelease = make(chan struct{})
+			process.submitErr = errors.New("synthetic closed stdin")
+			adapter := &jobAdapter{name: model.ProviderClaude, start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
+				go process.line("open https://example.invalid/login")
+				return process, nil
+			}}
+			service := openJobService(t, adapter)
+			defer service.Close()
+			job, detail := service.Jobs().StartOnboard(model.ProviderClaude, "work")
+			if detail != nil {
+				t.Fatal(detail)
+			}
+			waitForJobState(t, service, job.ID, "awaiting_user")
+			manager := service.Jobs()
+			manager.mu.RLock()
+			managed := manager.jobs[job.ID]
+			manager.mu.RUnlock()
+			submitDone := make(chan *model.ErrorDetail, 1)
+			go func() { submitDone <- manager.SubmitCode(job.ID, "SYNTHETIC-CODE") }()
+			select {
+			case <-process.submitStarted:
+			case <-time.After(time.Second):
+				t.Fatal("code submission did not reach the blocked write")
+			}
+			terminalDone := tt.terminate(manager, managed)
+			select {
+			case detail = <-terminalDone:
+				if detail != nil {
+					t.Fatal(detail)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("lifecycle transition blocked behind the code write")
+			}
+			close(process.submitRelease)
+			select {
+			case detail = <-submitDone:
+				if detail == nil || detail.Code != teach.JobCodeNotAccepted || detail.State["reason"] != "process_did_not_accept_code" {
+					t.Fatalf("submission detail = %#v", detail)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("code submission did not return after the child stopped")
+			}
+			job = waitForJobState(t, service, job.ID, tt.state)
+			if job.Error == nil || job.Error.Code != tt.code {
+				t.Fatalf("job = %#v", job)
+			}
+			manager.mu.RLock()
+			active := manager.activeProvider[model.ProviderClaude]
+			manager.mu.RUnlock()
+			if active != "" || process.submits.Load() != 1 {
+				t.Fatalf("active = %q, submissions = %d", active, process.submits.Load())
+			}
+			select {
+			case got := <-process.submitted:
+				t.Fatalf("stopped child received %q", got)
+			default:
+			}
+		})
+	}
+}
+
+func TestClaudeAuthorizationCodeSubmissionRejectsTimedOutJob(t *testing.T) {
+	process := newControlledLogin()
+	process.terminateExit = true
+	adapter := &jobAdapter{name: model.ProviderClaude, start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
+		go process.line("open https://example.invalid/login")
+		return process, nil
+	}}
+	service := openJobService(t, adapter)
+	defer service.Close()
+	job, detail := service.Jobs().StartOnboard(model.ProviderClaude, "work")
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	waitForJobState(t, service, job.ID, "awaiting_user")
+	manager := service.Jobs()
+	manager.mu.RLock()
+	managed := manager.jobs[job.ID]
+	manager.mu.RUnlock()
+	manager.recordFailure(managed, manager.timeoutDetail(managed))
+	manager.ensureStop(managed)
+	job = waitForJobState(t, service, job.ID, "failed")
+	if job.Error == nil || job.Error.Code != teach.LoginTimeout {
+		t.Fatalf("job = %#v", job)
+	}
+	if detail = manager.SubmitCode(job.ID, "SYNTHETIC-CODE"); detail == nil || detail.Code != teach.JobCodeNotAccepted || detail.State["reason"] != "job_not_awaiting_code" {
+		t.Fatalf("late detail = %#v", detail)
+	}
+	if process.submits.Load() != 0 {
+		t.Fatalf("submissions = %d", process.submits.Load())
+	}
 }
 
 func TestCodexDeviceAuthorizationUnavailableTeachesEnableAndRetry(t *testing.T) {

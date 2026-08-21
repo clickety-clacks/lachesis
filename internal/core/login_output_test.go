@@ -1,7 +1,9 @@
 package core
 
 import (
+	"encoding/json"
 	"io"
+	"os"
 	"strings"
 	"testing"
 )
@@ -23,11 +25,13 @@ func TestScanCodexDeviceOutputPublishesCompleteStructuredFields(t *testing.T) {
 		name  string
 		raw   string
 		chunk int
+		code  string
 	}{
-		{name: "together", raw: codexVerificationURL + " TEST-CODE\n", chunk: 256},
-		{name: "separate lines", raw: codexVerificationURL + "\nTEST-CODE\n", chunk: 256},
-		{name: "fragmented reads with ANSI", raw: "\x1b[94m" + codexVerificationURL + "\x1b[0m\n\x1b[94mTEST-CODE\x1b[0m\n", chunk: 1},
-		{name: "oversized line before prompt", raw: strings.Repeat("x", 128<<10) + "\n" + codexVerificationURL + "\nTEST-CODE\n", chunk: 256},
+		{name: "together", raw: codexVerificationURL + " TEST-CODE\n", chunk: 256, code: "TEST-CODE"},
+		{name: "separate lines", raw: codexVerificationURL + "\nTEST-CODE\n", chunk: 256, code: "TEST-CODE"},
+		{name: "fragmented reads with ANSI", raw: "\x1b[94m" + codexVerificationURL + "\x1b[0m\n\x1b[94mTEST-CODE\x1b[0m\n", chunk: 1, code: "TEST-CODE"},
+		{name: "numbered prose with variable code groups", raw: "1. \x1b[1;94m" + codexVerificationURL + "\x1b[0m\n2. \x1b[38;5;245mAB12-C345D\x1b[0m\n", chunk: 256, code: "AB12-C345D"},
+		{name: "oversized line before prompt", raw: strings.Repeat("x", 128<<10) + "\n" + codexVerificationURL + "\nTEST-CODE\n", chunk: 256, code: "TEST-CODE"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -35,7 +39,7 @@ func TestScanCodexDeviceOutputPublishesCompleteStructuredFields(t *testing.T) {
 			published := 0
 			result := scanCodexDeviceOutput(reader, func(url, code string) {
 				published++
-				if url != codexVerificationURL || code != "TEST-CODE" {
+				if url != codexVerificationURL || code != tt.code {
 					t.Fatalf("url = %q, code = %q", url, code)
 				}
 			})
@@ -43,6 +47,31 @@ func TestScanCodexDeviceOutputPublishesCompleteStructuredFields(t *testing.T) {
 				t.Fatalf("result = %#v, published = %d", result, published)
 			}
 		})
+	}
+}
+
+func TestScanCodexDeviceOutputUsesSanitizedObservedStructure(t *testing.T) {
+	raw, err := os.ReadFile("testdata/codex-device-auth-v0.149.0-structure.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Synthetic bool   `json:"synthetic"`
+		Output    string `json:"output"`
+		Code      string `json:"expected_code"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil || !fixture.Synthetic {
+		t.Fatalf("fixture: synthetic=%t, err=%v", fixture.Synthetic, err)
+	}
+	published := 0
+	result := scanCodexDeviceOutput(strings.NewReader(fixture.Output), func(url, code string) {
+		published++
+		if url != codexVerificationURL || code != fixture.Code {
+			t.Fatalf("url = %q, code = %q", url, code)
+		}
+	})
+	if !result.found || result.unavailable || result.expired || published != 1 {
+		t.Fatalf("result = %#v, published = %d", result, published)
 	}
 }
 

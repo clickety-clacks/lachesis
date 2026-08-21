@@ -72,11 +72,13 @@ type cancelProcess struct {
 	w       *io.PipeWriter
 	exit    chan struct{}
 	exitOne sync.Once
+	codes   chan string
+	submit  func(string) error
 }
 
 func newCancelProcess() *cancelProcess {
 	r, w := io.Pipe()
-	return &cancelProcess{r: r, w: w, exit: make(chan struct{})}
+	return &cancelProcess{r: r, w: w, exit: make(chan struct{}), codes: make(chan string, 1)}
 }
 func (p *cancelProcess) Output() io.ReadCloser { return p.r }
 func (p *cancelProcess) Wait() error {
@@ -86,6 +88,13 @@ func (p *cancelProcess) Wait() error {
 }
 func (p *cancelProcess) Terminate() error { p.exitOne.Do(func() { close(p.exit) }); return nil }
 func (p *cancelProcess) Kill() error      { p.exitOne.Do(func() { close(p.exit) }); return nil }
+func (p *cancelProcess) SubmitCode(code string) error {
+	p.codes <- code
+	if p.submit != nil {
+		return p.submit(code)
+	}
+	return nil
+}
 
 type cancelAdapter struct{ process *cancelProcess }
 
@@ -111,6 +120,24 @@ func (a *cancelAdapter) StartLogin(_ context.Context, home string) (provider.Log
 		return nil, teach.New(teach.CredentialCommitFailed, "Synthetic setup failed.", "onboard", nil, nil, nil)
 	}
 	go func() { _, _ = io.WriteString(a.process.w, "https://auth.openai.com/codex/device\nTEST-CODE\n") }()
+	return a.process, nil
+}
+
+type claudeCodeAdapter struct{ *cancelAdapter }
+
+func (*claudeCodeAdapter) Name() model.Provider { return model.ProviderClaude }
+func (*claudeCodeAdapter) ManagedBinding(home string) model.StoreBinding {
+	return model.StoreBinding{Kind: "file", Home: home, CredentialPath: filepath.Join(home, ".credentials.json")}
+}
+func (a *claudeCodeAdapter) StartLogin(_ context.Context, home string) (provider.LoginProcess, *model.ErrorDetail) {
+	a.process.submit = func(string) error {
+		if err := os.WriteFile(filepath.Join(home, ".credentials.json"), []byte("synthetic"), 0600); err != nil {
+			return err
+		}
+		a.process.exitOne.Do(func() { close(a.process.exit) })
+		return nil
+	}
+	go func() { _, _ = io.WriteString(a.process.w, "open https://example.invalid/login\n") }()
 	return a.process, nil
 }
 
@@ -158,6 +185,82 @@ func TestCancelJobEndpoint(t *testing.T) {
 	New(svc).Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+job.ID+"/cancel", nil))
 	if rr.Code != http.StatusOK || json.Unmarshal(rr.Body.Bytes(), &canceled) != nil || !canceled.UpdatedAt.Equal(updated) {
 		t.Fatalf("repeat status %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestSubmitClaudeJobCodeEndpointCompletesOnboardingWithoutReturningCode(t *testing.T) {
+	process := newCancelProcess()
+	adapter := &claudeCodeAdapter{cancelAdapter: &cancelAdapter{process: process}}
+	svc, detail := core.OpenService(t.TempDir(), []provider.Adapter{adapter}, checker{})
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	defer svc.Close()
+	handler := New(svc).Handler()
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/accounts", strings.NewReader(`{"provider":"claude","label":"work"}`)))
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("start status %d: %s", rr.Code, rr.Body.String())
+	}
+	var job model.Job
+	if err := json.Unmarshal(rr.Body.Bytes(), &job); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		rr = httptest.NewRecorder()
+		handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+job.ID, nil))
+		if rr.Code != http.StatusOK || json.Unmarshal(rr.Body.Bytes(), &job) != nil {
+			t.Fatalf("job status %d: %s", rr.Code, rr.Body.String())
+		}
+		if job.State == "awaiting_user" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job = %#v", job)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	const code = "SYNTHETIC-AUTHORIZATION-CODE"
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+job.ID+"/code", strings.NewReader(`{"code":"`+code+`"}`)))
+	if rr.Code != http.StatusNoContent || rr.Body.Len() != 0 {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	select {
+	case got := <-process.codes:
+		if got != code {
+			t.Fatal("submitted code changed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("code was not written to the login child")
+	}
+	for {
+		rr = httptest.NewRecorder()
+		handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+job.ID, nil))
+		if rr.Code != http.StatusOK || json.Unmarshal(rr.Body.Bytes(), &job) != nil {
+			t.Fatalf("job status %d: %s", rr.Code, rr.Body.String())
+		}
+		if job.State == "succeeded" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("job = %#v", job)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if job.ResultAccount == nil || job.AuthorizationURL != nil || strings.Contains(rr.Body.String(), code) {
+		t.Fatalf("completed body %s", rr.Body.String())
+	}
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+job.ID+"/code", strings.NewReader(`{"code":"`+code+`"}`)))
+	if rr.Code != http.StatusConflict || strings.Contains(rr.Body.String(), code) {
+		t.Fatalf("duplicate status %d: %s", rr.Code, rr.Body.String())
+	}
+	select {
+	case <-process.codes:
+		t.Fatal("duplicate code reached the login child")
+	default:
 	}
 }
 
@@ -210,7 +313,7 @@ func TestCancelJobEndpointRejectsBodyAndMissingJob(t *testing.T) {
 
 func TestJobsHelpDescribesCancelAndHeldLocks(t *testing.T) {
 	topic := topics["jobs"]
-	if len(topic.Examples) != 2 || topic.Examples[1].Method != http.MethodPost || topic.Examples[1].Path != "/api/v1/jobs/{id}/cancel" || !strings.Contains(topic.Summary, teach.JobProcessStopFailed) || !strings.Contains(topic.Summary, teach.CredentialCleanupPending) {
+	if len(topic.Examples) != 3 || topic.Examples[1].Method != http.MethodPost || topic.Examples[1].Path != "/api/v1/jobs/{id}/code" || topic.Examples[2].Method != http.MethodPost || topic.Examples[2].Path != "/api/v1/jobs/{id}/cancel" || !strings.Contains(topic.Summary, teach.JobProcessStopFailed) || !strings.Contains(topic.Summary, teach.CredentialCleanupPending) {
 		t.Fatalf("topic = %#v", topic)
 	}
 }

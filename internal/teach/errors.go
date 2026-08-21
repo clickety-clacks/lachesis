@@ -16,6 +16,7 @@ const (
 	StoreAlreadyRegistered          = "STORE_ALREADY_REGISTERED"
 	JobActive                       = "JOB_ACTIVE"
 	JobCanceled                     = "JOB_CANCELED"
+	JobCodeNotAccepted              = "JOB_CODE_NOT_ACCEPTED"
 	JobProcessStopFailed            = "JOB_PROCESS_STOP_FAILED"
 	LoginTimeout                    = "LOGIN_TIMEOUT"
 	LoginListenerExited             = "LOGIN_LISTENER_EXITED"
@@ -43,7 +44,7 @@ var status = map[string]int{
 	InvalidRequest: http.StatusBadRequest, AccountNotFound: http.StatusNotFound,
 	JobNotFound: http.StatusNotFound, HelpTopicNotFound: http.StatusNotFound,
 	NoAccountsOnboarded: http.StatusConflict, StoreAlreadyRegistered: http.StatusConflict,
-	JobActive: http.StatusConflict, JobCanceled: http.StatusConflict,
+	JobActive: http.StatusConflict, JobCanceled: http.StatusConflict, JobCodeNotAccepted: http.StatusConflict,
 	JobProcessStopFailed: http.StatusInternalServerError, LoginTimeout: http.StatusConflict,
 	LoginListenerExited: http.StatusBadGateway, LoginURLUnavailable: http.StatusBadGateway, CredentialChanged: http.StatusConflict,
 	DeviceAuthorizationUnavailable: http.StatusConflict,

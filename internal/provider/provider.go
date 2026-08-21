@@ -25,6 +25,10 @@ type LoginProcess interface {
 	Kill() error
 }
 
+type CodeSubmitter interface {
+	SubmitCode(string) error
+}
+
 type Adapter interface {
 	Name() model.Provider
 	CLIAvailable() bool

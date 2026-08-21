@@ -10,8 +10,8 @@ import (
 const codexVerificationURL = "https://auth.openai.com/codex/device"
 
 var (
-	ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
-	userCodePattern   = regexp.MustCompile(`\b[A-Z0-9]{4}-[A-Z0-9]{4}\b`)
+	ansiEscapePattern = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+	userCodePattern   = regexp.MustCompile(`\b[A-Z0-9]{3,}(?:-[A-Z0-9]{3,})+\b`)
 )
 
 type outputResult struct {
@@ -46,6 +46,7 @@ func scanCodexDeviceOutput(reader io.Reader, publish func(string, string)) outpu
 		line, err := buffered.ReadString('\n')
 		line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
 		line = ansiEscapePattern.ReplaceAllString(line, "")
+		codeInput := ""
 		lower := strings.ToLower(line)
 		switch {
 		case strings.Contains(lower, "device auth timed out"):
@@ -58,12 +59,18 @@ func scanCodexDeviceOutput(reader io.Reader, publish func(string, string)) outpu
 			result.unavailable = true
 		}
 		if verificationURL == "" {
-			if u := urlPattern.FindString(line); u != "" && strings.TrimRight(u, ".,;)") == codexVerificationURL {
-				verificationURL = codexVerificationURL
+			if location := urlPattern.FindStringIndex(line); location != nil {
+				u := strings.TrimRight(line[location[0]:location[1]], ".,;)")
+				if u == codexVerificationURL {
+					verificationURL = codexVerificationURL
+					codeInput = line[location[1]:]
+				}
 			}
+		} else {
+			codeInput = line
 		}
-		if userCode == "" {
-			userCode = userCodePattern.FindString(line)
+		if userCode == "" && codeInput != "" {
+			userCode = userCodePattern.FindString(codeInput)
 		}
 		if !result.found && verificationURL != "" && userCode != "" {
 			result.found = true
