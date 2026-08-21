@@ -276,17 +276,15 @@ func (j *JobManager) runOnboard(ctx context.Context, job *managedJob, accountID,
 		return
 	}
 	home := filepath.Join(j.service.stateDir, "providers", string(job.model.Provider), accountID)
-	if job.model.Provider == model.ProviderCodex {
-		busy, err := j.service.process.Busy(ctx, processcheck.Target{Provider: job.model.Provider, Home: home})
-		if err != nil || busy {
-			claimed := j.finishStart(job, nil, nil, "")
-			if claimed {
-				j.ensureStop(job)
-				return
-			}
-			j.failJob(job, teach.New(teach.CredentialStoreBusy, "The provider CLI is running or cannot be inspected.", "onboard", nil, map[string]any{"provider": job.model.Provider}, nil, "stop the provider CLI and retry when mutation_state is idle"))
+	busy, err := j.service.process.Busy(ctx, processcheck.Target{Provider: job.model.Provider, Home: home})
+	if err != nil || busy {
+		claimed := j.finishStart(job, nil, nil, "")
+		if claimed {
+			j.ensureStop(job)
 			return
 		}
+		j.failJob(job, teach.New(teach.CredentialStoreBusy, "The provider CLI is running or cannot be inspected.", "onboard", nil, map[string]any{"provider": job.model.Provider}, nil, "stop the provider CLI and retry when mutation_state is idle"))
+		return
 	}
 	if err := os.MkdirAll(home, 0700); err != nil {
 		j.finishStart(job, nil, providerHomeCleanupTarget{provider: job.model.Provider, home: home}, "")

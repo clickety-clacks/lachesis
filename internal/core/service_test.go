@@ -152,7 +152,7 @@ func TestNewOnboardingPersistsProviderFileBindings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(string(tt.provider), func(t *testing.T) {
 			adapter := &fakeAdapter{provider: tt.provider, credential: tt.credential, loginValue: []byte("synthetic")}
-			checker := &recordingChecker{busy: tt.provider == model.ProviderClaude}
+			checker := &recordingChecker{}
 			service, detail := OpenService(t.TempDir(), []provider.Adapter{adapter}, checker)
 			if detail != nil {
 				t.Fatal(detail)
@@ -170,8 +170,9 @@ func TestNewOnboardingPersistsProviderFileBindings(t *testing.T) {
 			if !ok || row.Store.Kind != "file" || filepath.Base(row.Store.CredentialPath) != tt.credential {
 				t.Fatalf("row = %#v", row)
 			}
-			if tt.provider == model.ProviderClaude && len(checker.snapshot()) != 0 {
-				t.Fatalf("Claude onboarding added busy targets: %#v", checker.snapshot())
+			targets := checker.snapshot()
+			if len(targets) != 1 || targets[0].Provider != tt.provider || filepath.Dir(targets[0].Home) != filepath.Join(service.stateDir, "providers", string(tt.provider)) {
+				t.Fatalf("targets = %#v", targets)
 			}
 		})
 	}

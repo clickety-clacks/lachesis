@@ -46,17 +46,14 @@ func (p PS) Busy(ctx context.Context, target Target) (bool, error) {
 		if len(fields) < 2 || commandBase(fields[1]) != want {
 			continue
 		}
-		if target.Provider != model.ProviderCodex {
-			return true, nil
-		}
 		metadata, metadataErr := run(ctx, "ps", metadataArgs(goos, fields[0])...)
 		if metadataErr != nil {
 			// The process may have exited between the process list and metadata read.
 			// A per-process miss cannot prove a target match and must not widen to
-			// every Codex home on the host.
+			// every provider home on the host.
 			continue
 		}
-		home, ok := codexHomeFromMetadata(string(metadata))
+		home, ok := providerHomeFromMetadata(target.Provider, string(metadata))
 		if ok && sameHome(home, target.Home) {
 			return true, nil
 		}
@@ -84,12 +81,21 @@ func commandBase(command string) string {
 
 var environmentEntry = regexp.MustCompile(`(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=`)
 
-func codexHomeFromMetadata(metadata string) (string, bool) {
+func providerHomeFromMetadata(providerName model.Provider, metadata string) (string, bool) {
 	matches := environmentEntry.FindAllStringSubmatchIndex(metadata, -1)
-	var codexHome, userHome string
+	var providerHome, userHome string
+	var homeKey string
+	switch providerName {
+	case model.ProviderCodex:
+		homeKey = "CODEX_HOME"
+	case model.ProviderClaude:
+		homeKey = "CLAUDE_CONFIG_DIR"
+	default:
+		return "", false
+	}
 	for i, match := range matches {
 		name := metadata[match[2]:match[3]]
-		if name != "CODEX_HOME" && name != "HOME" {
+		if name != homeKey && (providerName != model.ProviderCodex || name != "HOME") {
 			continue
 		}
 		end := len(metadata)
@@ -97,16 +103,16 @@ func codexHomeFromMetadata(metadata string) (string, bool) {
 			end = matches[i+1][0]
 		}
 		value := strings.TrimSpace(metadata[match[1]:end])
-		if name == "CODEX_HOME" {
-			codexHome = value
+		if name == homeKey {
+			providerHome = value
 		} else {
 			userHome = value
 		}
 	}
-	if codexHome != "" {
-		return codexHome, true
+	if providerHome != "" {
+		return providerHome, true
 	}
-	if userHome != "" {
+	if providerName == model.ProviderCodex && userHome != "" {
 		return filepath.Join(userHome, ".codex"), true
 	}
 	return "", false

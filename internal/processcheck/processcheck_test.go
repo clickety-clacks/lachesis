@@ -9,38 +9,56 @@ import (
 	"github.com/clickety-clacks/lachesis/internal/model"
 )
 
-func TestCodexBusyUsesExactTargetHome(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		metadata string
-		busy     bool
+func TestBusyUsesExactTargetProviderHome(t *testing.T) {
+	providers := []struct {
+		provider model.Provider
+		homeKey  string
 	}{
-		{name: "unrelated Tightbeam home", metadata: "CODEX_HOME=/srv/tightbeam/homes/adapter HOME=/srv/operator"},
-		{name: "other account home", metadata: "CODEX_HOME=/srv/lachesis/providers/codex/other HOME=/srv/operator"},
-		{name: "exact target home", metadata: "CODEX_HOME=/srv/lachesis/providers/codex/target HOME=/srv/operator", busy: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			checker := PS{goos: "linux", run: syntheticPS("101 /usr/local/bin/codex\n104 claude\n", map[string]string{"101": test.metadata}, nil)}
-			busy, err := checker.Busy(context.Background(), Target{Provider: model.ProviderCodex, Home: "/srv/lachesis/providers/codex/target"})
-			if err != nil || busy != test.busy {
-				t.Fatalf("busy = %v, err = %v", busy, err)
+		{provider: model.ProviderCodex, homeKey: "CODEX_HOME"},
+		{provider: model.ProviderClaude, homeKey: "CLAUDE_CONFIG_DIR"},
+	}
+	for _, providerTest := range providers {
+		t.Run(string(providerTest.provider), func(t *testing.T) {
+			targetHome := "/srv/lachesis/providers/" + string(providerTest.provider) + "/target"
+			otherHome := "/srv/lachesis/providers/" + string(providerTest.provider) + "/other"
+			for _, test := range []struct {
+				name     string
+				metadata string
+				busy     bool
+			}{
+				{name: "unrelated Tightbeam home", metadata: providerTest.homeKey + "=/srv/tightbeam/homes/adapter HOME=/srv/operator"},
+				{name: "other account home", metadata: providerTest.homeKey + "=" + otherHome + " HOME=/srv/operator"},
+				{name: "exact target home", metadata: providerTest.homeKey + "=" + targetHome + " HOME=/srv/operator", busy: true},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					processes := "101 /usr/local/bin/" + string(providerTest.provider) + "\n104 unrelated\n"
+					checker := PS{goos: "linux", run: syntheticPS(processes, map[string]string{"101": test.metadata}, nil)}
+					busy, err := checker.Busy(context.Background(), Target{Provider: providerTest.provider, Home: targetHome})
+					if err != nil || busy != test.busy {
+						t.Fatalf("busy = %v, err = %v", busy, err)
+					}
+				})
 			}
 		})
 	}
 }
 
-func TestCodexUnrelatedProcessesDoNotBlock(t *testing.T) {
-	checker := PS{goos: "linux", run: syntheticPS(
-		"201 codex\n202 codex\n203 codex\n",
-		map[string]string{
-			"201": "CODEX_HOME=/srv/tightbeam/homes/adapter HOME=/srv/operator",
-			"202": "CODEX_HOME=/srv/lachesis/providers/codex/other HOME=/srv/operator",
-		},
-		map[string]error{"203": errors.New("synthetic metadata refusal")},
-	)}
-	busy, err := checker.Busy(context.Background(), Target{Provider: model.ProviderCodex, Home: "/srv/lachesis/providers/codex/target"})
-	if err != nil || busy {
-		t.Fatalf("busy = %v, err = %v", busy, err)
+func TestUnreadableProviderMetadataDoesNotBecomeHostGlobal(t *testing.T) {
+	for _, providerName := range []model.Provider{model.ProviderCodex, model.ProviderClaude} {
+		t.Run(string(providerName), func(t *testing.T) {
+			checker := PS{goos: "linux", run: syntheticPS(
+				"201 "+string(providerName)+"\n202 "+string(providerName)+"\n203 "+string(providerName)+"\n",
+				map[string]string{
+					"201": providerHomeKey(providerName) + "=/srv/tightbeam/homes/adapter HOME=/srv/operator",
+					"202": providerHomeKey(providerName) + "=/srv/lachesis/providers/" + string(providerName) + "/other HOME=/srv/operator",
+				},
+				map[string]error{"203": errors.New("synthetic metadata refusal")},
+			)}
+			busy, err := checker.Busy(context.Background(), Target{Provider: providerName, Home: "/srv/lachesis/providers/" + string(providerName) + "/target"})
+			if err != nil || busy {
+				t.Fatalf("busy = %v, err = %v", busy, err)
+			}
+		})
 	}
 }
 
@@ -52,10 +70,18 @@ func TestCodexDefaultHomeUsesProcessHome(t *testing.T) {
 	}
 }
 
-func TestCodexHomeUsesFinalEnvironmentAssignment(t *testing.T) {
-	home, ok := codexHomeFromMetadata("/usr/bin/codex prompt CODEX_HOME=/argument/path PATH=/bin CODEX_HOME=/srv/target home HOME=/srv/operator")
-	if !ok || home != "/srv/target home" {
-		t.Fatalf("home = %q, ok = %v", home, ok)
+func TestProviderHomeUsesFinalEnvironmentAssignment(t *testing.T) {
+	for _, test := range []struct {
+		provider model.Provider
+		metadata string
+	}{
+		{provider: model.ProviderCodex, metadata: "/usr/bin/codex prompt CODEX_HOME=/argument/path PATH=/bin CODEX_HOME=/srv/target home HOME=/srv/operator"},
+		{provider: model.ProviderClaude, metadata: "/usr/bin/claude prompt CLAUDE_CONFIG_DIR=/argument/path PATH=/bin CLAUDE_CONFIG_DIR=/srv/target home HOME=/srv/operator"},
+	} {
+		home, ok := providerHomeFromMetadata(test.provider, test.metadata)
+		if !ok || home != "/srv/target home" {
+			t.Fatalf("%s home = %q, ok = %v", test.provider, home, ok)
+		}
 	}
 }
 
@@ -68,21 +94,6 @@ func TestProcessListFailureRemainsAnError(t *testing.T) {
 	}
 }
 
-func TestClaudeBusyBehaviorRemainsProviderWide(t *testing.T) {
-	calls := 0
-	checker := PS{run: func(_ context.Context, _ string, args ...string) ([]byte, error) {
-		calls++
-		if !reflect.DeepEqual(args, []string{"-axo", "pid=,comm="}) {
-			t.Fatalf("args = %#v", args)
-		}
-		return []byte("401 /usr/local/bin/claude\n"), nil
-	}}
-	busy, err := checker.Busy(context.Background(), Target{Provider: model.ProviderClaude, Home: "/unrelated/home"})
-	if err != nil || !busy || calls != 1 {
-		t.Fatalf("busy = %v, err = %v, calls = %d", busy, err, calls)
-	}
-}
-
 func TestMetadataArgumentsArePlatformSpecific(t *testing.T) {
 	if got := metadataArgs("darwin", "501"); !reflect.DeepEqual(got, []string{"-Eww", "-p", "501", "-o", "command="}) {
 		t.Fatalf("darwin args = %#v", got)
@@ -90,6 +101,13 @@ func TestMetadataArgumentsArePlatformSpecific(t *testing.T) {
 	if got := metadataArgs("linux", "501"); !reflect.DeepEqual(got, []string{"-ww", "-p", "501", "-o", "environ="}) {
 		t.Fatalf("linux args = %#v", got)
 	}
+}
+
+func providerHomeKey(providerName model.Provider) string {
+	if providerName == model.ProviderClaude {
+		return "CLAUDE_CONFIG_DIR"
+	}
+	return "CODEX_HOME"
 }
 
 func syntheticPS(processes string, metadata map[string]string, failures map[string]error) commandRunner {

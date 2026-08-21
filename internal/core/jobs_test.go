@@ -180,68 +180,80 @@ func waitForJobState(t *testing.T, service *Service, id string, states ...string
 }
 
 func TestOnboardBusyCheckUsesAllocatedProviderHome(t *testing.T) {
-	stateDir := t.TempDir()
-	checker := &recordingChecker{busy: true}
-	adapter := &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
-		t.Fatal("StartLogin called")
-		return nil, nil
-	}}
-	service, detail := OpenService(stateDir, []provider.Adapter{adapter}, checker)
-	if detail != nil {
-		t.Fatal(detail)
-	}
-	defer service.Close()
-	job, detail := service.Jobs().StartOnboard(model.ProviderCodex, "work")
-	if detail != nil {
-		t.Fatal(detail)
-	}
-	job = waitForJobState(t, service, job.ID, "failed")
-	if job.Error == nil || job.Error.Code != teach.CredentialStoreBusy || job.Error.Message != "The provider CLI is running or cannot be inspected." || job.Error.Help != "/api/v1/help/onboard" || len(job.Error.Remedy.Commands) != 1 || job.Error.Remedy.Commands[0] != "stop the provider CLI and retry when mutation_state is idle" || job.Error.State["provider"] != model.ProviderCodex {
-		t.Fatalf("job = %#v", job)
-	}
-	targets := checker.snapshot()
-	if len(targets) != 1 || targets[0].Provider != model.ProviderCodex || filepath.Dir(targets[0].Home) != filepath.Join(stateDir, "providers", "codex") {
-		t.Fatalf("targets = %#v", targets)
-	}
-	if adapter.startCount() != 0 {
-		t.Fatalf("starts = %d", adapter.startCount())
+	for _, providerName := range []model.Provider{model.ProviderCodex, model.ProviderClaude} {
+		t.Run(string(providerName), func(t *testing.T) {
+			stateDir := t.TempDir()
+			checker := &recordingChecker{busy: true}
+			adapter := &jobAdapter{name: providerName, start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
+				t.Fatal("StartLogin called")
+				return nil, nil
+			}}
+			service, detail := OpenService(stateDir, []provider.Adapter{adapter}, checker)
+			if detail != nil {
+				t.Fatal(detail)
+			}
+			defer service.Close()
+			job, detail := service.Jobs().StartOnboard(providerName, "work")
+			if detail != nil {
+				t.Fatal(detail)
+			}
+			job = waitForJobState(t, service, job.ID, "failed")
+			if job.Error == nil || job.Error.Code != teach.CredentialStoreBusy || job.Error.Message != "The provider CLI is running or cannot be inspected." || job.Error.Help != "/api/v1/help/onboard" || len(job.Error.Remedy.Commands) != 1 || job.Error.Remedy.Commands[0] != "stop the provider CLI and retry when mutation_state is idle" || job.Error.State["provider"] != providerName {
+				t.Fatalf("job = %#v", job)
+			}
+			targets := checker.snapshot()
+			if len(targets) != 1 || targets[0].Provider != providerName || filepath.Dir(targets[0].Home) != filepath.Join(stateDir, "providers", string(providerName)) {
+				t.Fatalf("targets = %#v", targets)
+			}
+			if adapter.startCount() != 0 {
+				t.Fatalf("starts = %d", adapter.startCount())
+			}
+		})
 	}
 }
 
 func TestReOnboardBusyCheckUsesRegisteredProviderHome(t *testing.T) {
-	checker := &recordingChecker{busy: true}
-	adapter := &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
-		t.Fatal("StartLogin called")
-		return nil, nil
-	}}
-	service, detail := OpenService(t.TempDir(), []provider.Adapter{adapter}, checker)
-	if detail != nil {
-		t.Fatal(detail)
-	}
-	defer service.Close()
-	home := t.TempDir()
-	credentialPath := filepath.Join(home, "auth.json")
-	if err := os.WriteFile(credentialPath, []byte("synthetic"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	account, detail := service.Adopt(context.Background(), model.ProviderCodex, "work", model.StoreBinding{Kind: "file", Home: home, CredentialPath: credentialPath})
-	if detail != nil {
-		t.Fatal(detail)
-	}
-	job, detail := service.Jobs().StartReOnboard(account.ID)
-	if detail != nil {
-		t.Fatal(detail)
-	}
-	job = waitForJobState(t, service, job.ID, "failed")
-	if job.Error == nil || job.Error.Code != teach.CredentialStoreBusy || job.Error.Message != "The provider CLI is running or cannot be inspected." || job.Error.Help != "/api/v1/help/re-onboard" || len(job.Error.Remedy.Commands) != 1 || job.Error.Remedy.Commands[0] != "stop the provider CLI and retry when mutation_state is idle" || job.Error.State["provider"] != model.ProviderCodex {
-		t.Fatalf("job = %#v", job)
-	}
-	targets := checker.snapshot()
-	if len(targets) != 1 || targets[0] != (processcheck.Target{Provider: model.ProviderCodex, Home: home}) {
-		t.Fatalf("targets = %#v", targets)
-	}
-	if adapter.startCount() != 0 {
-		t.Fatalf("starts = %d", adapter.startCount())
+	for _, providerName := range []model.Provider{model.ProviderCodex, model.ProviderClaude} {
+		t.Run(string(providerName), func(t *testing.T) {
+			checker := &recordingChecker{busy: true}
+			adapter := &jobAdapter{name: providerName, start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
+				t.Fatal("StartLogin called")
+				return nil, nil
+			}}
+			service, detail := OpenService(t.TempDir(), []provider.Adapter{adapter}, checker)
+			if detail != nil {
+				t.Fatal(detail)
+			}
+			defer service.Close()
+			home := t.TempDir()
+			credentialName := "auth.json"
+			if providerName == model.ProviderClaude {
+				credentialName = ".credentials.json"
+			}
+			credentialPath := filepath.Join(home, credentialName)
+			if err := os.WriteFile(credentialPath, []byte("synthetic"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			account, detail := service.Adopt(context.Background(), providerName, "work", model.StoreBinding{Kind: "file", Home: home, CredentialPath: credentialPath})
+			if detail != nil {
+				t.Fatal(detail)
+			}
+			job, detail := service.Jobs().StartReOnboard(account.ID)
+			if detail != nil {
+				t.Fatal(detail)
+			}
+			job = waitForJobState(t, service, job.ID, "failed")
+			if job.Error == nil || job.Error.Code != teach.CredentialStoreBusy || job.Error.Message != "The provider CLI is running or cannot be inspected." || job.Error.Help != "/api/v1/help/re-onboard" || len(job.Error.Remedy.Commands) != 1 || job.Error.Remedy.Commands[0] != "stop the provider CLI and retry when mutation_state is idle" || job.Error.State["provider"] != providerName {
+				t.Fatalf("job = %#v", job)
+			}
+			targets := checker.snapshot()
+			if len(targets) != 1 || targets[0] != (processcheck.Target{Provider: providerName, Home: home}) {
+				t.Fatalf("targets = %#v", targets)
+			}
+			if adapter.startCount() != 0 {
+				t.Fatalf("starts = %d", adapter.startCount())
+			}
+		})
 	}
 }
 
