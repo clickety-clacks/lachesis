@@ -287,12 +287,16 @@ func TestRefreshBusyCheckUsesRegisteredProviderHome(t *testing.T) {
 	if detail != nil {
 		t.Fatal(detail)
 	}
+	registered, ok := service.registry.Find(account.ID)
+	if !ok {
+		t.Fatal("registered account not found")
+	}
 	_, detail = service.Refresh(context.Background(), account.ID)
 	if detail == nil || detail.Code != teach.CredentialStoreBusy || detail.Message != "The provider CLI is running." || detail.Help != "/api/v1/help/refresh" || len(detail.Remedy.Commands) != 1 || detail.Remedy.Commands[0] != "stop the provider CLI and retry when mutation_state is idle" {
 		t.Fatalf("detail = %#v", detail)
 	}
 	targets := checker.snapshot()
-	if len(targets) != 1 || targets[0] != (processcheck.Target{Provider: model.ProviderCodex, Home: home}) {
+	if len(targets) != 1 || targets[0] != (processcheck.Target{Provider: model.ProviderCodex, Home: registered.Store.Home}) {
 		t.Fatalf("targets = %#v", targets)
 	}
 }
@@ -424,8 +428,12 @@ func TestAdoptPersistsResolvedCredentialAuthority(t *testing.T) {
 	if detail != nil {
 		t.Fatal(detail)
 	}
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
 	row, ok := service.registry.Find(account.ID)
-	if !ok || row.Store.CredentialPath != target {
+	if !ok || row.Store.CredentialPath != resolvedTarget {
 		t.Fatalf("registry row = %#v", row)
 	}
 }

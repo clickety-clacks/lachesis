@@ -75,8 +75,12 @@ func TestFileResolvesCredentialSymlinkToOneAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := s.Binding().CredentialPath; got != target {
-		t.Fatalf("canonical path %q, want %q", got, target)
+	canonicalTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Binding().CredentialPath; got != canonicalTarget {
+		t.Fatalf("canonical path %q, want %q", got, canonicalTarget)
 	}
 	digest, err := s.Digest(context.Background())
 	if err != nil {
@@ -112,7 +116,11 @@ func TestFileResolvesMissingCredentialThroughSymlinkedHome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(targetHome, "auth.json")
+	canonicalHome, err := filepath.EvalSymlinks(targetHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(canonicalHome, "auth.json")
 	if got := s.Binding().CredentialPath; got != want {
 		t.Fatalf("canonical path %q, want %q", got, want)
 	}

@@ -238,6 +238,10 @@ func TestReOnboardBusyCheckUsesRegisteredProviderHome(t *testing.T) {
 			if detail != nil {
 				t.Fatal(detail)
 			}
+			registered, ok := service.registry.Find(account.ID)
+			if !ok {
+				t.Fatal("registered account not found")
+			}
 			job, detail := service.Jobs().StartReOnboard(account.ID)
 			if detail != nil {
 				t.Fatal(detail)
@@ -247,7 +251,7 @@ func TestReOnboardBusyCheckUsesRegisteredProviderHome(t *testing.T) {
 				t.Fatalf("job = %#v", job)
 			}
 			targets := checker.snapshot()
-			if len(targets) != 1 || targets[0] != (processcheck.Target{Provider: providerName, Home: home}) {
+			if len(targets) != 1 || targets[0] != (processcheck.Target{Provider: providerName, Home: registered.Store.Home}) {
 				t.Fatalf("targets = %#v", targets)
 			}
 			if adapter.startCount() != 0 {
