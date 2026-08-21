@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/clickety-clacks/lachesis/internal/teach"
 )
 
 func TestStartLoginUsesDeviceAuthorizationInIsolatedHome(t *testing.T) {
@@ -35,5 +37,13 @@ func TestStartLoginUsesDeviceAuthorizationInIsolatedHome(t *testing.T) {
 	output := string(raw)
 	if !strings.Contains(output, "args=login --device-auth\n") || !strings.Contains(output, "home="+home+"\n") {
 		t.Fatalf("synthetic command output = %q", output)
+	}
+}
+
+func TestStartLoginFailureUsesOnboardHelp(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	process, detail := (&Adapter{}).StartLogin(context.Background(), t.TempDir())
+	if process != nil || detail == nil || detail.Code != teach.CLIMissing || detail.Message != "Codex device authorization could not start." || detail.Help != "/api/v1/help/onboard" || len(detail.Remedy.Commands) != 1 || detail.Remedy.Commands[0] != "retry the exact call" {
+		t.Fatalf("process = %#v, detail = %#v", process, detail)
 	}
 }

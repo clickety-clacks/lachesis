@@ -285,37 +285,45 @@ func TestCodexDeviceAuthorizationFieldsAreTransient(t *testing.T) {
 }
 
 func TestCodexDeviceAuthorizationUnavailableTeachesEnableAndRetry(t *testing.T) {
-	starts := 0
-	adapter := &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
-		starts++
-		attempt := starts
-		process := newControlledLogin()
-		go func() {
-			if attempt == 1 {
-				process.line("Error logging in with device code: device code login is not enabled for this Codex server. PRIVATE_RAW_LOGIN_SENTINEL")
-				process.finish(errors.New("exit 1"))
-				return
+	phrases := []string{
+		"device code login is not enabled",
+		"please contact your workspace admin to enable device code authentication",
+		"device code request failed",
+		"unexpected argument '--device-auth'",
+		"unrecognized option '--device-auth'",
+	}
+	for _, phrase := range phrases {
+		t.Run(phrase, func(t *testing.T) {
+			adapter := &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
+				process := newControlledLogin()
+				go func() {
+					process.line(phrase + " PRIVATE_RAW_LOGIN_SENTINEL")
+					process.line("TEST-CODE")
+					process.finish(errors.New("exit 1"))
+				}()
+				return process, nil
+			}}
+			service := openJobService(t, adapter)
+			defer service.Close()
+			job, detail := service.Jobs().StartOnboard(model.ProviderCodex, "work")
+			if detail != nil {
+				t.Fatal(detail)
 			}
-			process.finish(nil)
-		}()
-		return process, nil
-	}}
-	service := openJobService(t, adapter)
-	defer service.Close()
-	job, detail := service.Jobs().StartOnboard(model.ProviderCodex, "work")
-	if detail != nil {
-		t.Fatal(detail)
+			job = waitForJobState(t, service, job.ID, "failed")
+			if job.Error == nil || job.Error.Code != teach.DeviceAuthorizationUnavailable || job.Error.Message != "Codex device authorization is disabled or unavailable." || len(job.Error.Prerequisites) != 2 ||
+				job.Error.Prerequisites[0] != (model.Prerequisite{Code: "CODEX_DEVICE_AUTHORIZATION_SUPPORTED", Description: "The installed Codex CLI supports codex login --device-auth.", Met: false}) ||
+				job.Error.Prerequisites[1] != (model.Prerequisite{Code: "CODEX_DEVICE_AUTHORIZATION_ENABLED", Description: "Device code authentication is enabled in ChatGPT security settings or workspace permissions.", Met: false}) ||
+				job.Error.Remedy.Summary != "Enable Codex device authorization, then retry the same onboarding call." || len(job.Error.Remedy.Calls) != 1 {
+				t.Fatalf("job = %#v", job)
+			}
+			call := job.Error.Remedy.Calls[0]
+			body, ok := call.Body.(map[string]any)
+			if call.Method != "POST" || call.Path != "/api/v1/accounts" || !ok || body["provider"] != model.ProviderCodex || body["label"] != "work" {
+				t.Fatalf("retry call = %#v", call)
+			}
+			assertNoRetainedLoginPrompt(t, job, "TEST-CODE", "PRIVATE_RAW_LOGIN_SENTINEL", phrase)
+		})
 	}
-	job = waitForJobState(t, service, job.ID, "failed")
-	if job.Error == nil || job.Error.Code != teach.DeviceAuthorizationUnavailable || len(job.Error.Prerequisites) != 2 || len(job.Error.Remedy.Calls) != 1 || job.Error.Remedy.Calls[0].Path != "/api/v1/accounts" {
-		t.Fatalf("job = %#v", job)
-	}
-	assertNoRetainedLoginPrompt(t, job, "TEST-CODE", "PRIVATE_RAW_LOGIN_SENTINEL")
-	retry, detail := service.Jobs().StartOnboard(model.ProviderCodex, "work")
-	if detail != nil {
-		t.Fatalf("retry = %#v", detail)
-	}
-	waitForJobState(t, service, retry.ID, "failed")
 }
 
 func TestCodexDeviceAuthorizationExpiryClearsCode(t *testing.T) {
@@ -341,27 +349,35 @@ func TestCodexDeviceAuthorizationExpiryClearsCode(t *testing.T) {
 	assertNoRetainedLoginPrompt(t, job, "TEST-CODE", "PRIVATE_RAW_LOGIN_SENTINEL")
 }
 
-func TestCodexCallbackURLIsNeverSurfaced(t *testing.T) {
-	process := newControlledLogin()
-	adapter := &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
-		go func() {
-			process.line("https://localhost:1455/auth/callback")
-			process.line("TEST-CODE")
-			process.finish(nil)
-		}()
-		return process, nil
-	}}
-	service := openJobService(t, adapter)
-	defer service.Close()
-	job, detail := service.Jobs().StartOnboard(model.ProviderCodex, "work")
-	if detail != nil {
-		t.Fatal(detail)
+func TestCodexIncompletePromptIsNeverSurfaced(t *testing.T) {
+	for name, lines := range map[string][]string{
+		"callback and code":         {"https://localhost:1455/auth/callback", "TEST-CODE"},
+		"official URL without code": {codexVerificationURL},
+	} {
+		t.Run(name, func(t *testing.T) {
+			process := newControlledLogin()
+			adapter := &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
+				go func() {
+					for _, line := range lines {
+						process.line(line)
+					}
+					process.finish(nil)
+				}()
+				return process, nil
+			}}
+			service := openJobService(t, adapter)
+			defer service.Close()
+			job, detail := service.Jobs().StartOnboard(model.ProviderCodex, "work")
+			if detail != nil {
+				t.Fatal(detail)
+			}
+			job = waitForJobState(t, service, job.ID, "failed")
+			if job.Error == nil || job.Error.Code != teach.LoginURLUnavailable {
+				t.Fatalf("job = %#v", job)
+			}
+			assertNoRetainedLoginPrompt(t, job, lines...)
+		})
 	}
-	job = waitForJobState(t, service, job.ID, "failed")
-	if job.Error == nil || job.Error.Code != teach.LoginURLUnavailable {
-		t.Fatalf("job = %#v", job)
-	}
-	assertNoRetainedLoginPrompt(t, job, "TEST-CODE", "https://localhost:1455/auth/callback")
 }
 
 func assertNoRetainedLoginPrompt(t *testing.T, job model.Job, forbidden ...string) {

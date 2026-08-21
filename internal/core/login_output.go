@@ -36,12 +36,16 @@ func scanBrowserLoginOutput(reader io.Reader, publish func(string)) outputResult
 }
 
 func scanCodexDeviceOutput(reader io.Reader, publish func(string, string)) outputResult {
-	scanner := bufio.NewScanner(reader)
+	// ReadString has no token-size ceiling, and this loop keeps consuming after
+	// publication so the merged child stream is drained through EOF.
+	buffered := bufio.NewReader(reader)
 	verificationURL := ""
 	userCode := ""
 	result := outputResult{}
-	for scanner.Scan() {
-		line := ansiEscapePattern.ReplaceAllString(scanner.Text(), "")
+	for {
+		line, err := buffered.ReadString('\n')
+		line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+		line = ansiEscapePattern.ReplaceAllString(line, "")
 		lower := strings.ToLower(line)
 		switch {
 		case strings.Contains(lower, "device auth timed out"):
@@ -64,6 +68,9 @@ func scanCodexDeviceOutput(reader io.Reader, publish func(string, string)) outpu
 		if !result.found && verificationURL != "" && userCode != "" {
 			result.found = true
 			publish(verificationURL, userCode)
+		}
+		if err != nil {
+			break
 		}
 	}
 	return result
