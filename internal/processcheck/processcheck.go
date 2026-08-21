@@ -2,6 +2,7 @@ package processcheck
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -119,5 +120,21 @@ func providerHomeFromMetadata(providerName model.Provider, metadata string) (str
 }
 
 func sameHome(processHome, targetHome string) bool {
-	return filepath.IsAbs(processHome) && filepath.IsAbs(targetHome) && filepath.Clean(processHome) == filepath.Clean(targetHome)
+	if !filepath.IsAbs(processHome) || !filepath.IsAbs(targetHome) {
+		return false
+	}
+	processHome = filepath.Clean(processHome)
+	targetHome = filepath.Clean(targetHome)
+	if processHome == targetHome {
+		return true
+	}
+	processInfo, err := os.Stat(processHome)
+	if err != nil {
+		return false
+	}
+	targetInfo, err := os.Stat(targetHome)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(processInfo, targetInfo)
 }

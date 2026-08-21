@@ -3,6 +3,8 @@ package processcheck
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -38,6 +40,30 @@ func TestBusyUsesExactTargetProviderHome(t *testing.T) {
 						t.Fatalf("busy = %v, err = %v", busy, err)
 					}
 				})
+			}
+		})
+	}
+}
+
+func TestBusyRecognizesTargetProviderHomeFilesystemAlias(t *testing.T) {
+	realHome := filepath.Join(t.TempDir(), "real-home")
+	if err := os.Mkdir(realHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	aliasHome := filepath.Join(filepath.Dir(realHome), "alias-home")
+	if err := os.Symlink(realHome, aliasHome); err != nil {
+		t.Fatal(err)
+	}
+	for _, providerName := range []model.Provider{model.ProviderCodex, model.ProviderClaude} {
+		t.Run(string(providerName), func(t *testing.T) {
+			checker := PS{goos: "darwin", run: syntheticPS(
+				"101 "+string(providerName)+"\n",
+				map[string]string{"101": providerHomeKey(providerName) + "=" + aliasHome + " HOME=/Users/operator"},
+				nil,
+			)}
+			busy, err := checker.Busy(context.Background(), Target{Provider: providerName, Home: realHome})
+			if err != nil || !busy {
+				t.Fatalf("busy = %v, err = %v", busy, err)
 			}
 		})
 	}
