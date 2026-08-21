@@ -227,9 +227,12 @@ func claudeWindow(id, name string, b bucket) (model.Window, bool) {
 	if b.Utilization == nil {
 		return model.Window{}, false
 	}
-	p := *b.Utilization * 100
+	p := *b.Utilization
 	if p < 0 || p > 100 {
 		return model.Window{}, false
+	}
+	if p <= 1 {
+		p *= 100
 	}
 	return model.Window{ID: id, Name: name, UsedPercent: p, ResetsAt: b.ResetsAt}, true
 }

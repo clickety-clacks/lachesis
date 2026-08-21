@@ -159,6 +159,17 @@ func openJobService(t *testing.T, adapter provider.Adapter) *Service {
 	return service
 }
 
+func claudeNoValidWindowDetail() *model.ErrorDetail {
+	return teach.New(
+		teach.UpstreamContractChanged,
+		"Claude usage contained no valid recognized limit window.",
+		"usage",
+		[]model.Prerequisite{{Code: "VALID_RECOGNIZED_WINDOW", Description: "The provider response contains at least one valid recognized usage window.", Met: false}},
+		map[string]any{"provider": model.ProviderClaude},
+		nil,
+	)
+}
+
 type recordingChecker struct {
 	mu      sync.Mutex
 	targets []processcheck.Target
@@ -299,6 +310,102 @@ func TestLoginSuccessWaitsConcurrentlyAndNeedsNoURL(t *testing.T) {
 	job = waitForJobState(t, service, job.ID, "succeeded")
 	if job.AuthorizationURL != nil || job.VerificationURL != nil || job.UserCode != nil || job.Error != nil {
 		t.Fatalf("job = %#v", job)
+	}
+}
+
+func TestClaudeOnboardUsageContractChangeRegistersDegradedSuccess(t *testing.T) {
+	adapter := &jobAdapter{name: model.ProviderClaude, start: func(home string) (provider.LoginProcess, *model.ErrorDetail) {
+		if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte("synthetic"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		process := newControlledLogin()
+		process.finish(nil)
+		return process, nil
+	}}
+	adapter.usage = func(context.Context, provider.Credential) (*model.UsageSample, *model.ErrorDetail) {
+		return nil, claudeNoValidWindowDetail()
+	}
+	service := openJobService(t, adapter)
+	defer service.Close()
+
+	job, detail := service.Jobs().StartOnboard(model.ProviderClaude, "work")
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	job = waitForJobState(t, service, job.ID, "succeeded")
+	if job.Error != nil || job.ResultAccount == nil || job.ResultAccount.Status != model.StatusDegraded || job.ResultAccount.Working || job.ResultAccount.LastError == nil || job.ResultAccount.LastError.Code != teach.UpstreamContractChanged {
+		t.Fatalf("job = %#v", job)
+	}
+	if registered, ok := service.registry.Find(job.ResultAccount.ID); !ok || registered.Provider != model.ProviderClaude {
+		t.Fatalf("registered = %#v, found = %t", registered, ok)
+	}
+	if _, err := os.Stat(filepath.Join(adapter.lastHome(), "auth.json")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClaudeOnboardOtherContractFailureStillFails(t *testing.T) {
+	adapter := &jobAdapter{name: model.ProviderClaude, start: func(home string) (provider.LoginProcess, *model.ErrorDetail) {
+		if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte("synthetic"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		process := newControlledLogin()
+		process.finish(nil)
+		return process, nil
+	}}
+	adapter.usage = func(context.Context, provider.Credential) (*model.UsageSample, *model.ErrorDetail) {
+		return nil, teach.New(teach.UpstreamContractChanged, "Synthetic unsafe Claude usage response.", "usage", nil, map[string]any{"provider": model.ProviderClaude}, nil)
+	}
+	service := openJobService(t, adapter)
+	defer service.Close()
+
+	job, detail := service.Jobs().StartOnboard(model.ProviderClaude, "work")
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	job = waitForJobState(t, service, job.ID, "failed")
+	if job.Error == nil || job.Error.Code != teach.UpstreamContractChanged || job.ResultAccount != nil || len(service.registry.Snapshot().Accounts) != 0 {
+		t.Fatalf("job = %#v, registry = %#v", job, service.registry.Snapshot())
+	}
+}
+
+func TestClaudeReOnboardUsageContractChangeCommitsDegradedSuccess(t *testing.T) {
+	adapter := &jobAdapter{name: model.ProviderClaude, start: func(home string) (provider.LoginProcess, *model.ErrorDetail) {
+		if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte("candidate"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		process := newControlledLogin()
+		process.finish(nil)
+		return process, nil
+	}}
+	service := openJobService(t, adapter)
+	defer service.Close()
+	originalHome := t.TempDir()
+	originalPath := filepath.Join(originalHome, "auth.json")
+	if err := os.WriteFile(originalPath, []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	account, detail := service.Adopt(context.Background(), model.ProviderClaude, "work", model.StoreBinding{Kind: "file", Home: originalHome, CredentialPath: originalPath})
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	adapter.usage = func(context.Context, provider.Credential) (*model.UsageSample, *model.ErrorDetail) {
+		return nil, claudeNoValidWindowDetail()
+	}
+
+	job, detail := service.Jobs().StartReOnboard(account.ID)
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	job = waitForJobState(t, service, job.ID, "succeeded")
+	if job.Error != nil || job.ResultAccount == nil || job.ResultAccount.Status != model.StatusDegraded || job.ResultAccount.MutationState != model.MutationIdle || job.ResultAccount.LastError == nil || job.ResultAccount.LastError.Code != teach.UpstreamContractChanged {
+		t.Fatalf("job = %#v", job)
+	}
+	if raw, err := os.ReadFile(originalPath); err != nil || string(raw) != "candidate" {
+		t.Fatalf("committed credential = %q, %v", raw, err)
+	}
+	if _, err := os.Stat(filepath.Join(service.stateDir, "transactions", job.ID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("transaction remains: %v", err)
 	}
 }
 
@@ -1086,6 +1193,67 @@ func TestCommitAndCancelHaveOneWinner(t *testing.T) {
 		go func() { result, _ := service.Jobs().Cancel(job.ID); done <- result }()
 		close(release)
 		if result := <-done; result.State != "succeeded" {
+			t.Fatalf("result = %#v", result)
+		}
+		if len(service.registry.Snapshot().Accounts) != 1 {
+			t.Fatalf("registry = %#v", service.registry.Snapshot())
+		}
+	})
+}
+
+func TestClaudeDegradedOnboardCommitAndCancelHaveOneWinner(t *testing.T) {
+	newAdapter := func() *jobAdapter {
+		adapter := &jobAdapter{name: model.ProviderClaude, start: func(home string) (provider.LoginProcess, *model.ErrorDetail) {
+			if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte("synthetic"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			process := newControlledLogin()
+			process.finish(nil)
+			return process, nil
+		}}
+		adapter.usage = func(context.Context, provider.Credential) (*model.UsageSample, *model.ErrorDetail) {
+			return nil, claudeNoValidWindowDetail()
+		}
+		return adapter
+	}
+	t.Run("cancel before claim", func(t *testing.T) {
+		service := openJobService(t, newAdapter())
+		defer service.Close()
+		reached := make(chan struct{})
+		release := make(chan struct{})
+		service.Jobs().beforeCommit = func(*managedJob) { close(reached); <-release }
+		job, detail := service.Jobs().StartOnboard(model.ProviderClaude, "work")
+		if detail != nil {
+			t.Fatal(detail)
+		}
+		<-reached
+		done := make(chan model.Job, 1)
+		go func() { canceled, _ := service.Jobs().Cancel(job.ID); done <- canceled }()
+		waitForJobState(t, service, job.ID, "canceling", "canceled")
+		close(release)
+		if canceled := <-done; canceled.State != "canceled" {
+			t.Fatalf("canceled = %#v", canceled)
+		}
+		if len(service.registry.Snapshot().Accounts) != 0 {
+			t.Fatalf("registry = %#v", service.registry.Snapshot())
+		}
+	})
+	t.Run("commit before cancel", func(t *testing.T) {
+		service := openJobService(t, newAdapter())
+		defer service.Close()
+		reached := make(chan struct{})
+		release := make(chan struct{})
+		service.Jobs().afterCommit = func(*managedJob) { close(reached); <-release }
+		job, detail := service.Jobs().StartOnboard(model.ProviderClaude, "work")
+		if detail != nil {
+			t.Fatal(detail)
+		}
+		<-reached
+		done := make(chan model.Job, 1)
+		go func() { result, _ := service.Jobs().Cancel(job.ID); done <- result }()
+		close(release)
+		result := <-done
+		if result.State != "succeeded" || result.ResultAccount == nil || result.ResultAccount.Status != model.StatusDegraded || result.Error != nil {
 			t.Fatalf("result = %#v", result)
 		}
 		if len(service.registry.Snapshot().Accounts) != 1 {

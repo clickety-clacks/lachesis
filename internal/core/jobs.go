@@ -383,7 +383,7 @@ func (j *JobManager) runOnboard(ctx context.Context, job *managedJob, accountID,
 		return
 	}
 	sample, detail := adapter.Usage(verificationCtx, cred)
-	if detail != nil {
+	if detail != nil && !degradedClaudeVerification(job.model.Provider, detail) {
 		j.failJob(job, detail)
 		return
 	}
@@ -402,13 +402,22 @@ func (j *JobManager) runOnboard(ctx context.Context, job *managedJob, accountID,
 		j.failJob(job, teach.New(teach.RegistryCommitFailed, "The onboarded account could not be committed.", "onboard", nil, nil, nil, "preserve state and retry"))
 		return
 	}
+	runtime := &runtimeAccount{status: model.StatusReady, mutation: model.MutationIdle}
+	if detail != nil {
+		now := j.now().UTC()
+		runtime.status = model.StatusDegraded
+		runtime.checked = &now
+		runtime.lastErr = detail
+	}
 	j.service.mu.Lock()
-	j.service.state[accountID] = &runtimeAccount{status: model.StatusReady, mutation: model.MutationIdle}
+	j.service.state[accountID] = runtime
 	j.service.mu.Unlock()
-	sample.AccountID = accountID
-	sample.Label = label
-	j.service.cache.Install(accountID, *sample)
-	j.completeSuccess(job, j.service.accountView(row))
+	if sample != nil {
+		sample.AccountID = accountID
+		sample.Label = label
+		j.service.cache.Install(accountID, *sample)
+	}
+	j.completeSuccess(job, row, detail)
 }
 
 func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row model.RegistryAccount, runtime *runtimeAccount) {
@@ -480,7 +489,7 @@ func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row mode
 		j.failJob(job, accountAwareDetail(row.ID, detail))
 		return
 	}
-	if _, detail = adapter.Usage(verificationCtx, cred); detail != nil {
+	if _, detail = adapter.Usage(verificationCtx, cred); detail != nil && !degradedClaudeVerification(job.model.Provider, detail) {
 		j.failJob(job, accountAwareDetail(row.ID, detail))
 		return
 	}
@@ -517,11 +526,13 @@ func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row mode
 	}
 	j.service.cache.Clear(row.ID)
 	sample, detail := j.service.fetchDirect(verificationCtx, row)
-	if detail != nil {
+	if detail != nil && !degradedClaudeVerification(job.model.Provider, detail) {
 		j.failJob(job, detail)
 		return
 	}
-	j.service.cache.Install(row.ID, *sample)
+	if sample != nil {
+		j.service.cache.Install(row.ID, *sample)
+	}
 	if err := j.removeTransactionOnce(transactionCleanupTarget{path: tx}); err != nil {
 		j.recordFailure(job, teach.New(teach.CredentialCleanupPending, "The re-onboard transaction could not be removed.", "jobs", nil, map[string]any{"job_id": job.model.ID, "transaction_path": tx}, j.jobRemedyCalls(job)))
 		stopDetail := j.cleanupPendingDetail(job, tx)
@@ -535,7 +546,18 @@ func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row mode
 		j.mu.Unlock()
 		return
 	}
-	j.completeSuccess(job, j.service.accountView(row))
+	j.completeSuccess(job, row, detail)
+}
+
+func degradedClaudeVerification(providerName model.Provider, detail *model.ErrorDetail) bool {
+	if providerName != model.ProviderClaude || detail == nil || detail.Code != teach.UpstreamContractChanged || len(detail.Prerequisites) != 1 {
+		return false
+	}
+	return detail.Prerequisites[0] == (model.Prerequisite{
+		Code:        "VALID_RECOGNIZED_WINDOW",
+		Description: "The provider response contains at least one valid recognized usage window.",
+		Met:         false,
+	})
 }
 
 func (j *JobManager) beginStart(job *managedJob) bool {
@@ -866,7 +888,7 @@ func (j *JobManager) finalizeClaimLocked(job *managedJob) {
 	close(job.terminalDone)
 }
 
-func (j *JobManager) completeSuccess(job *managedJob, account model.Account) {
+func (j *JobManager) completeSuccess(job *managedJob, row model.RegistryAccount, verificationDetail *model.ErrorDetail) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if job.claim != nil || terminalState(job.model.State) {
@@ -876,7 +898,6 @@ func (j *JobManager) completeSuccess(job *managedJob, account model.Account) {
 	job.model.State = "succeeded"
 	job.model.UpdatedAt = j.now().UTC()
 	clearLoginPrompt(&job.model)
-	job.model.ResultAccount = &account
 	job.model.Error = nil
 	if j.activeProvider[job.model.Provider] == job.model.ID {
 		delete(j.activeProvider, job.model.Provider)
@@ -885,8 +906,10 @@ func (j *JobManager) completeSuccess(job *managedJob, account model.Account) {
 		if j.activeAccount[*job.model.AccountID] == job.model.ID {
 			delete(j.activeAccount, *job.model.AccountID)
 		}
-		j.finishAccountMutationLocked(job, nil, false)
+		j.finishAccountMutationLocked(job, verificationDetail, false)
 	}
+	account := j.service.accountView(row)
+	job.model.ResultAccount = &account
 	if job.cancel != nil {
 		job.cancel()
 	}

@@ -40,7 +40,7 @@ func TestDefaultBindingRejectsRelativeClaudeConfigDir(t *testing.T) {
 }
 
 func TestNormalizeOmitsInvalidFixedBucketAndKeepsSibling(t *testing.T) {
-	raw := json.RawMessage(`{"five_hour":{"utilization":1.01},"seven_day":{"utilization":0.5}}`)
+	raw := json.RawMessage(`{"five_hour":{"utilization":101},"seven_day":{"utilization":0.5}}`)
 	sample, detail := normalize(raw, time.Unix(1, 0))
 	if detail != nil {
 		t.Fatal(detail)
@@ -49,6 +49,17 @@ func TestNormalizeOmitsInvalidFixedBucketAndKeepsSibling(t *testing.T) {
 		t.Fatalf("windows=%#v diagnostics=%#v raw_preserved=%t", sample.Windows, sample.Diagnostics, string(sample.Raw) == string(raw))
 	}
 	assertClaudeDiagnostic(t, sample.Diagnostics[0])
+}
+
+func TestNormalizeAcceptsFractionalAndPercentScaleBuckets(t *testing.T) {
+	raw := json.RawMessage(`{"five_hour":{"utilization":0.25},"seven_day":{"utilization":25},"seven_day_sonnet":{"utilization":1}}`)
+	sample, detail := normalize(raw, time.Unix(1, 0))
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	if len(sample.Windows) != 3 || sample.Windows[0].UsedPercent != 25 || sample.Windows[1].UsedPercent != 25 || sample.Windows[2].UsedPercent != 100 || len(sample.Diagnostics) != 0 || string(sample.Raw) != string(raw) {
+		t.Fatalf("sample = %#v", sample)
+	}
 }
 
 func TestNormalizeCombinesFixedAndMapLimitsWithLocalDegradation(t *testing.T) {
@@ -136,7 +147,7 @@ func TestNormalizePreservesValidRawResponse(t *testing.T) {
 func TestNormalizeFailsClosedWithoutValidRecognizedWindow(t *testing.T) {
 	for _, raw := range []json.RawMessage{
 		json.RawMessage(`{}`),
-		json.RawMessage(`{"five_hour":{"utilization":1.01}}`),
+		json.RawMessage(`{"five_hour":{"utilization":101}}`),
 		json.RawMessage(`{"limits":[{"utilization":0.5}]}`),
 	} {
 		sample, detail := normalize(raw, time.Unix(1, 0))
