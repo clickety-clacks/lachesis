@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +24,10 @@ import (
 type checker struct{}
 
 func (checker) Busy(_ context.Context, _ model.Provider) (bool, error) { return false, nil }
+
+type readError struct{}
+
+func (readError) Read([]byte) (int, error) { return 0, errors.New("synthetic read failure") }
 func TestEmptyUsageTeaches(t *testing.T) {
 	svc, d := core.OpenService(t.TempDir(), nil, checker{})
 	if d != nil {
@@ -163,6 +168,21 @@ func TestCancelJobEndpointRejectsBodyAndMissingJob(t *testing.T) {
 	defer svc.Close()
 	handler := New(svc).Handler()
 	for name, body := range map[string]string{
+		"zero bytes":           "",
+		"ASCII whitespace":     " \t\r\n",
+		"non-ASCII whitespace": "\u2003\u00a0",
+		"one MiB whitespace":   strings.Repeat(" ", 1<<20),
+	} {
+		t.Run(name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/job_missing/cancel", strings.NewReader(body)))
+			if rr.Code != http.StatusNotFound {
+				t.Fatalf("body status %d: %s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+	for name, body := range map[string]string{
+		"one byte":                   `x`,
 		"object":                     `{}`,
 		"whitespace prefixed object": `  {}`,
 		"oversized whitespace":       strings.Repeat(" ", (1<<20)+1),
@@ -176,6 +196,11 @@ func TestCancelJobEndpointRejectsBodyAndMissingJob(t *testing.T) {
 		})
 	}
 	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/job_missing/cancel", readError{}))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("read error status %d: %s", rr.Code, rr.Body.String())
+	}
+	rr = httptest.NewRecorder()
 	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/job_missing/cancel", nil))
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("missing status %d: %s", rr.Code, rr.Body.String())
@@ -194,12 +219,12 @@ func TestOnboardHelpDescribesRemoteCodexDeviceAuthorization(t *testing.T) {
 	jobs := topics["jobs"]
 	reOnboard := topics["re-onboard"]
 	for name, summary := range map[string]string{"onboard": onboard.Summary, "jobs": jobs.Summary, "re-onboard": reOnboard.Summary} {
-		if !strings.Contains(summary, "device") {
+		if !strings.Contains(summary, "verification_url") || !strings.Contains(summary, "user_code") || !strings.Contains(summary, "any device") || !strings.Contains(summary, "continue polling") || !strings.Contains(summary, "no callback") || !strings.Contains(summary, "SSH-forwarding") {
 			t.Fatalf("%s summary = %q", name, summary)
 		}
 	}
-	if !strings.Contains(onboard.Summary, "verification_url") || !strings.Contains(onboard.Summary, "user_code") || !strings.Contains(onboard.Summary, "no callback") || !strings.Contains(onboard.Summary, "SSH-forwarding") {
-		t.Fatalf("onboard topic = %#v", onboard)
+	if !strings.Contains(onboard.Summary, "Claude keeps its browser-login flow") || !strings.Contains(reOnboard.Summary, "Claude uses browser login") {
+		t.Fatalf("Claude help changed: onboard = %q, re-onboard = %q", onboard.Summary, reOnboard.Summary)
 	}
 	if len(onboard.Prerequisites) != 2 || onboard.Prerequisites[1].Code != "CODEX_DEVICE_AUTHORIZATION_ENABLED" {
 		t.Fatalf("onboard prerequisites = %#v", onboard.Prerequisites)

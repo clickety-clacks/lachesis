@@ -73,6 +73,7 @@ type jobAdapter struct {
 	starts  int
 	homes   []string
 	start   func(string) (provider.LoginProcess, *model.ErrorDetail)
+	usage   func(context.Context, provider.Credential) (*model.UsageSample, *model.ErrorDetail)
 	barrier chan struct{}
 }
 
@@ -95,7 +96,11 @@ func (*jobAdapter) ParseCredential(raw []byte) (provider.Credential, *model.Erro
 	}
 	return provider.Credential{Raw: append([]byte(nil), raw...)}, nil
 }
-func (*jobAdapter) Usage(context.Context, provider.Credential) (*model.UsageSample, *model.ErrorDetail) {
+
+func (a *jobAdapter) Usage(ctx context.Context, credential provider.Credential) (*model.UsageSample, *model.ErrorDetail) {
+	if a.usage != nil {
+		return a.usage(ctx, credential)
+	}
 	return &model.UsageSample{Provider: model.ProviderCodex, ObservedAt: time.Unix(1, 0), Windows: []model.Window{{ID: "primary", Name: "Primary", UsedPercent: 10}}, Raw: []byte(`{"ok":true}`)}, nil
 }
 func (*jobAdapter) Refresh(context.Context, provider.Credential) ([]byte, *model.ErrorDetail) {
@@ -394,8 +399,139 @@ func TestCompletedLoginSuccessWinsObservableDeadline(t *testing.T) {
 	if detail := service.Jobs().observeLogin(ctx, job); detail != nil {
 		t.Fatalf("completed success lost to deadline: %v", detail)
 	}
-	if !service.Jobs().transitionActive(job, "verifying", nil, nil) || job.model.State != "verifying" {
+	verificationCtx, ok := service.Jobs().beginVerification(job)
+	if !ok || verificationCtx.Err() != nil || job.model.State != "verifying" {
 		t.Fatalf("job = %#v", job.model)
+	}
+}
+
+func TestExpiredLoginContextHandsOffToVerification(t *testing.T) {
+	for _, kind := range []string{"onboard", "re_onboard"} {
+		t.Run(kind, func(t *testing.T) {
+			var verificationPhase atomic.Bool
+			adapter := &jobAdapter{start: func(home string) (provider.LoginProcess, *model.ErrorDetail) {
+				if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte("synthetic"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				process := newControlledLogin()
+				go func() {
+					process.devicePrompt()
+					process.finish(nil)
+				}()
+				return process, nil
+			}}
+			adapter.usage = func(ctx context.Context, _ provider.Credential) (*model.UsageSample, *model.ErrorDetail) {
+				if verificationPhase.Load() && ctx.Err() != nil {
+					return nil, teach.New(teach.UpstreamTimeout, "Synthetic verification inherited the login deadline.", "onboard", nil, nil, nil)
+				}
+				return &model.UsageSample{Provider: model.ProviderCodex, ObservedAt: time.Unix(1, 0), Windows: []model.Window{{ID: "primary", Name: "Primary", UsedPercent: 10}}, Raw: []byte(`{"ok":true}`)}, nil
+			}
+			service := openJobService(t, adapter)
+			defer service.Close()
+
+			manager := service.Jobs()
+			var account model.Account
+			if kind == "re_onboard" {
+				originalHome := t.TempDir()
+				originalPath := filepath.Join(originalHome, "auth.json")
+				if err := os.WriteFile(originalPath, []byte("original"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				var detail *model.ErrorDetail
+				account, detail = service.Adopt(context.Background(), model.ProviderCodex, "work", model.StoreBinding{Kind: "file", Home: originalHome, CredentialPath: originalPath})
+				if detail != nil {
+					t.Fatal(detail)
+				}
+			}
+			manager.beforeVerify = func(job *managedJob) {
+				job.cancel()
+				verificationPhase.Store(true)
+			}
+			var job model.Job
+			var detail *model.ErrorDetail
+			if kind == "onboard" {
+				job, detail = manager.StartOnboard(model.ProviderCodex, "work")
+			} else {
+				job, detail = manager.StartReOnboard(account.ID)
+			}
+			if detail != nil {
+				t.Fatal(detail)
+			}
+			job = waitForJobState(t, service, job.ID, "succeeded")
+			if !verificationPhase.Load() || job.Error != nil {
+				t.Fatalf("job = %#v", job)
+			}
+		})
+	}
+}
+
+func TestCancelUsesInstalledVerificationContext(t *testing.T) {
+	for _, kind := range []string{"onboard", "re_onboard"} {
+		t.Run(kind, func(t *testing.T) {
+			verificationPhase := atomic.Bool{}
+			verificationContext := make(chan context.Context, 1)
+			adapter := &jobAdapter{start: func(home string) (provider.LoginProcess, *model.ErrorDetail) {
+				if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte("candidate"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				process := newControlledLogin()
+				go func() {
+					process.devicePrompt()
+					process.finish(nil)
+				}()
+				return process, nil
+			}}
+			adapter.usage = func(ctx context.Context, _ provider.Credential) (*model.UsageSample, *model.ErrorDetail) {
+				if !verificationPhase.Load() {
+					return &model.UsageSample{Provider: model.ProviderCodex, ObservedAt: time.Unix(1, 0), Windows: []model.Window{{ID: "primary", Name: "Primary", UsedPercent: 10}}, Raw: []byte(`{"ok":true}`)}, nil
+				}
+				verificationContext <- ctx
+				<-ctx.Done()
+				return nil, teach.New(teach.UpstreamTimeout, "Synthetic verification was canceled.", "onboard", nil, nil, nil)
+			}
+			service := openJobService(t, adapter)
+			defer service.Close()
+			manager := service.Jobs()
+			var account model.Account
+			originalPath := ""
+			if kind == "re_onboard" {
+				originalHome := t.TempDir()
+				originalPath = filepath.Join(originalHome, "auth.json")
+				if err := os.WriteFile(originalPath, []byte("original"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				var detail *model.ErrorDetail
+				account, detail = service.Adopt(context.Background(), model.ProviderCodex, "work", model.StoreBinding{Kind: "file", Home: originalHome, CredentialPath: originalPath})
+				if detail != nil {
+					t.Fatal(detail)
+				}
+			}
+			manager.beforeVerify = func(*managedJob) { verificationPhase.Store(true) }
+			var job model.Job
+			var detail *model.ErrorDetail
+			if kind == "onboard" {
+				job, detail = manager.StartOnboard(model.ProviderCodex, "work")
+			} else {
+				job, detail = manager.StartReOnboard(account.ID)
+			}
+			if detail != nil {
+				t.Fatal(detail)
+			}
+			ctx := <-verificationContext
+			if ctx.Err() != nil {
+				t.Fatalf("verification context started canceled: %v", ctx.Err())
+			}
+			job, detail = manager.Cancel(job.ID)
+			if detail != nil || job.State != "canceled" || !errors.Is(ctx.Err(), context.Canceled) {
+				t.Fatalf("job = %#v, detail = %#v, context = %v", job, detail, ctx.Err())
+			}
+			if originalPath != "" {
+				raw, err := os.ReadFile(originalPath)
+				if err != nil || string(raw) != "original" {
+					t.Fatalf("original credential = %q, %v", raw, err)
+				}
+			}
+		})
 	}
 }
 

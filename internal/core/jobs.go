@@ -66,6 +66,7 @@ type JobManager struct {
 	removeAll      func(string) error
 	stat           func(string) (os.FileInfo, error)
 	beforeStart    func(*managedJob)
+	beforeVerify   func(*managedJob)
 	beforeCommit   func(*managedJob)
 	afterCommit    func(*managedJob)
 	onCommitWait   func(*managedJob)
@@ -303,7 +304,11 @@ func (j *JobManager) runOnboard(ctx context.Context, job *managedJob, accountID,
 	if detail = j.observeLogin(ctx, job); detail != nil {
 		return
 	}
-	if !j.transitionActive(job, "verifying", nil, nil) {
+	if j.beforeVerify != nil {
+		j.beforeVerify(job)
+	}
+	verificationCtx, ok := j.beginVerification(job)
+	if !ok {
 		j.ensureStop(job)
 		return
 	}
@@ -312,7 +317,7 @@ func (j *JobManager) runOnboard(ctx context.Context, job *managedJob, accountID,
 		j.failJob(job, teach.New(teach.CredentialMissing, "The managed credential cannot be opened.", "onboard", nil, nil, nil, "retry onboarding"))
 		return
 	}
-	raw, err := st.Read(ctx)
+	raw, err := st.Read(verificationCtx)
 	if err != nil {
 		j.failJob(job, teach.New(teach.CredentialMissing, "The provider CLI did not write a credential.", "onboard", nil, nil, nil, "retry onboarding"))
 		return
@@ -322,7 +327,7 @@ func (j *JobManager) runOnboard(ctx context.Context, job *managedJob, accountID,
 		j.failJob(job, detail)
 		return
 	}
-	sample, detail := adapter.Usage(ctx, cred)
+	sample, detail := adapter.Usage(verificationCtx, cred)
 	if detail != nil {
 		j.failJob(job, detail)
 		return
@@ -397,7 +402,11 @@ func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row mode
 	if detail = j.observeLogin(ctx, job); detail != nil {
 		return
 	}
-	if !j.transitionActive(job, "verifying", nil, nil) {
+	if j.beforeVerify != nil {
+		j.beforeVerify(job)
+	}
+	verificationCtx, ok := j.beginVerification(job)
+	if !ok {
 		j.ensureStop(job)
 		return
 	}
@@ -406,7 +415,7 @@ func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row mode
 		j.failJob(job, teach.New(teach.CredentialMissing, "The candidate store cannot be opened.", "re-onboard", nil, nil, nil, "retry re-onboarding"))
 		return
 	}
-	candidate, err := candidateStore.Read(ctx)
+	candidate, err := candidateStore.Read(verificationCtx)
 	if err != nil {
 		j.failJob(job, teach.New(teach.CredentialMissing, "The login did not produce a credential.", "re-onboard", nil, nil, nil, "retry re-onboarding"))
 		return
@@ -416,7 +425,7 @@ func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row mode
 		j.failJob(job, accountAwareDetail(row.ID, detail))
 		return
 	}
-	if _, detail = adapter.Usage(ctx, cred); detail != nil {
+	if _, detail = adapter.Usage(verificationCtx, cred); detail != nil {
 		j.failJob(job, accountAwareDetail(row.ID, detail))
 		return
 	}
@@ -425,7 +434,7 @@ func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row mode
 		j.failJob(job, teach.New(teach.CredentialCommitFailed, "The original store cannot be opened.", "re-onboard", nil, nil, nil, "verify the original store"))
 		return
 	}
-	old, readErr := original.Read(ctx)
+	old, readErr := original.Read(verificationCtx)
 	expected := store.DigestBytes(old)
 	if errors.Is(readErr, os.ErrNotExist) {
 		expected = [32]byte{}
@@ -443,7 +452,7 @@ func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row mode
 	if j.afterCommit != nil {
 		j.afterCommit(job)
 	}
-	if err = original.Commit(ctx, expected, candidate); err != nil {
+	if err = original.Commit(verificationCtx, expected, candidate); err != nil {
 		code := teach.CredentialCommitFailed
 		if errors.Is(err, store.ErrAtomicUnavailable) {
 			code = teach.KeychainAtomicCommitUnavailable
@@ -452,7 +461,7 @@ func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row mode
 		return
 	}
 	j.service.cache.Clear(row.ID)
-	sample, detail := j.service.fetchDirect(ctx, row)
+	sample, detail := j.service.fetchDirect(verificationCtx, row)
 	if detail != nil {
 		j.failJob(job, detail)
 		return
@@ -619,19 +628,24 @@ func (j *JobManager) setDeviceAuthorization(job *managedJob, url, code string) {
 	job.model.UserCode = &code
 }
 
-func (j *JobManager) transitionActive(job *managedJob, state string, url *string, detail *model.ErrorDetail) bool {
+// beginVerification replaces the deadline-limited login context in the same
+// locked transition that exposes verifying, so later work cannot inherit it.
+func (j *JobManager) beginVerification(job *managedJob) (context.Context, bool) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if job.claim != nil || job.commitClaim || terminalState(job.model.State) {
-		return false
+		return nil, false
 	}
-	job.model.State = state
+	if job.cancel != nil {
+		job.cancel()
+	}
+	verificationCtx, cancel := context.WithCancel(j.ctx)
+	job.cancel = cancel
+	job.model.State = "verifying"
 	job.model.UpdatedAt = j.now().UTC()
-	job.model.AuthorizationURL = url
-	job.model.VerificationURL = nil
-	job.model.UserCode = nil
-	job.model.Error = detail
-	return true
+	clearLoginPrompt(&job.model)
+	job.model.Error = nil
+	return verificationCtx, true
 }
 
 func (j *JobManager) beginCommit(job *managedJob) bool {
