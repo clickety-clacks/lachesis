@@ -16,6 +16,7 @@ import (
 
 	"github.com/clickety-clacks/lachesis/internal/core"
 	"github.com/clickety-clacks/lachesis/internal/model"
+	"github.com/clickety-clacks/lachesis/internal/processcheck"
 	"github.com/clickety-clacks/lachesis/internal/provider"
 	"github.com/clickety-clacks/lachesis/internal/provider/claude"
 	"github.com/clickety-clacks/lachesis/internal/teach"
@@ -23,7 +24,7 @@ import (
 
 type checker struct{}
 
-func (checker) Busy(_ context.Context, _ model.Provider) (bool, error) { return false, nil }
+func (checker) Busy(_ context.Context, _ processcheck.Target) (bool, error) { return false, nil }
 
 type readError struct{}
 

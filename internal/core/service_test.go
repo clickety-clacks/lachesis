@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/clickety-clacks/lachesis/internal/model"
+	"github.com/clickety-clacks/lachesis/internal/processcheck"
 	"github.com/clickety-clacks/lachesis/internal/provider"
 	"github.com/clickety-clacks/lachesis/internal/store"
 	"github.com/clickety-clacks/lachesis/internal/teach"
@@ -17,7 +18,7 @@ import (
 
 type idleChecker struct{}
 
-func (idleChecker) Busy(context.Context, model.Provider) (bool, error) { return false, nil }
+func (idleChecker) Busy(context.Context, processcheck.Target) (bool, error) { return false, nil }
 
 type fakeAdapter struct {
 	usageDetail *model.ErrorDetail
@@ -151,7 +152,8 @@ func TestNewOnboardingPersistsProviderFileBindings(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(string(tt.provider), func(t *testing.T) {
 			adapter := &fakeAdapter{provider: tt.provider, credential: tt.credential, loginValue: []byte("synthetic")}
-			service, detail := OpenService(t.TempDir(), []provider.Adapter{adapter}, idleChecker{})
+			checker := &recordingChecker{busy: tt.provider == model.ProviderClaude}
+			service, detail := OpenService(t.TempDir(), []provider.Adapter{adapter}, checker)
 			if detail != nil {
 				t.Fatal(detail)
 			}
@@ -167,6 +169,9 @@ func TestNewOnboardingPersistsProviderFileBindings(t *testing.T) {
 			row, ok := service.registry.Find(job.ResultAccount.ID)
 			if !ok || row.Store.Kind != "file" || filepath.Base(row.Store.CredentialPath) != tt.credential {
 				t.Fatalf("row = %#v", row)
+			}
+			if tt.provider == model.ProviderClaude && len(checker.snapshot()) != 0 {
+				t.Fatalf("Claude onboarding added busy targets: %#v", checker.snapshot())
 			}
 		})
 	}
@@ -261,6 +266,33 @@ func TestCredentialRejectionTeachesAccountReOnboard(t *testing.T) {
 	}
 	if len(detail.Remedy.Commands) != 0 || detail.Help != "/api/v1/help/re-onboard" {
 		t.Fatalf("teaching detail = %#v", detail)
+	}
+}
+
+func TestRefreshBusyCheckUsesRegisteredProviderHome(t *testing.T) {
+	checker := &recordingChecker{busy: true}
+	adapter := &fakeAdapter{}
+	service, detail := OpenService(t.TempDir(), []provider.Adapter{adapter}, checker)
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	defer service.Close()
+	home := t.TempDir()
+	credentialPath := filepath.Join(home, "auth.json")
+	if err := os.WriteFile(credentialPath, []byte("synthetic"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	account, detail := service.Adopt(context.Background(), model.ProviderCodex, "work", model.StoreBinding{Kind: "file", Home: home, CredentialPath: credentialPath})
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	_, detail = service.Refresh(context.Background(), account.ID)
+	if detail == nil || detail.Code != teach.CredentialStoreBusy || detail.Message != "The provider CLI is running." || detail.Help != "/api/v1/help/refresh" || len(detail.Remedy.Commands) != 1 || detail.Remedy.Commands[0] != "stop the provider CLI and retry when mutation_state is idle" {
+		t.Fatalf("detail = %#v", detail)
+	}
+	targets := checker.snapshot()
+	if len(targets) != 1 || targets[0] != (processcheck.Target{Provider: model.ProviderCodex, Home: home}) {
+		t.Fatalf("targets = %#v", targets)
 	}
 }
 

@@ -295,7 +295,7 @@ func (s *Service) Refresh(ctx context.Context, id string) (model.Account, *model
 	r.mutation = model.MutationRefreshing
 	r.mu.Unlock()
 	defer func() { r.mu.Lock(); r.mutation = model.MutationIdle; r.mu.Unlock() }()
-	busy, err := s.process.Busy(ctx, row.Provider)
+	busy, err := s.process.Busy(ctx, processcheck.Target{Provider: row.Provider, Home: row.Store.Home})
 	if err != nil {
 		d = teach.New(teach.UpstreamUnavailable, "Provider process state cannot be inspected.", "refresh", nil, map[string]any{"provider": row.Provider}, nil, "retry the exact call")
 		s.applyError(r, d, nil)

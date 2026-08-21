@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/clickety-clacks/lachesis/internal/model"
+	"github.com/clickety-clacks/lachesis/internal/processcheck"
 	"github.com/clickety-clacks/lachesis/internal/provider"
 	"github.com/clickety-clacks/lachesis/internal/teach"
 )
@@ -138,6 +139,26 @@ func openJobService(t *testing.T, adapter provider.Adapter) *Service {
 	return service
 }
 
+type recordingChecker struct {
+	mu      sync.Mutex
+	targets []processcheck.Target
+	busy    bool
+	err     error
+}
+
+func (c *recordingChecker) Busy(_ context.Context, target processcheck.Target) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.targets = append(c.targets, target)
+	return c.busy, c.err
+}
+
+func (c *recordingChecker) snapshot() []processcheck.Target {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]processcheck.Target(nil), c.targets...)
+}
+
 func waitForJobState(t *testing.T, service *Service, id string, states ...string) model.Job {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -155,6 +176,72 @@ func waitForJobState(t *testing.T, service *Service, id string, states ...string
 			t.Fatalf("job did not reach %v: %#v", states, job)
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestOnboardBusyCheckUsesAllocatedProviderHome(t *testing.T) {
+	stateDir := t.TempDir()
+	checker := &recordingChecker{busy: true}
+	adapter := &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
+		t.Fatal("StartLogin called")
+		return nil, nil
+	}}
+	service, detail := OpenService(stateDir, []provider.Adapter{adapter}, checker)
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	defer service.Close()
+	job, detail := service.Jobs().StartOnboard(model.ProviderCodex, "work")
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	job = waitForJobState(t, service, job.ID, "failed")
+	if job.Error == nil || job.Error.Code != teach.CredentialStoreBusy || job.Error.Message != "The provider CLI is running or cannot be inspected." || job.Error.Help != "/api/v1/help/onboard" || len(job.Error.Remedy.Commands) != 1 || job.Error.Remedy.Commands[0] != "stop the provider CLI and retry when mutation_state is idle" || job.Error.State["provider"] != model.ProviderCodex {
+		t.Fatalf("job = %#v", job)
+	}
+	targets := checker.snapshot()
+	if len(targets) != 1 || targets[0].Provider != model.ProviderCodex || filepath.Dir(targets[0].Home) != filepath.Join(stateDir, "providers", "codex") {
+		t.Fatalf("targets = %#v", targets)
+	}
+	if adapter.startCount() != 0 {
+		t.Fatalf("starts = %d", adapter.startCount())
+	}
+}
+
+func TestReOnboardBusyCheckUsesRegisteredProviderHome(t *testing.T) {
+	checker := &recordingChecker{busy: true}
+	adapter := &jobAdapter{start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
+		t.Fatal("StartLogin called")
+		return nil, nil
+	}}
+	service, detail := OpenService(t.TempDir(), []provider.Adapter{adapter}, checker)
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	defer service.Close()
+	home := t.TempDir()
+	credentialPath := filepath.Join(home, "auth.json")
+	if err := os.WriteFile(credentialPath, []byte("synthetic"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	account, detail := service.Adopt(context.Background(), model.ProviderCodex, "work", model.StoreBinding{Kind: "file", Home: home, CredentialPath: credentialPath})
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	job, detail := service.Jobs().StartReOnboard(account.ID)
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	job = waitForJobState(t, service, job.ID, "failed")
+	if job.Error == nil || job.Error.Code != teach.CredentialStoreBusy || job.Error.Message != "The provider CLI is running or cannot be inspected." || job.Error.Help != "/api/v1/help/re-onboard" || len(job.Error.Remedy.Commands) != 1 || job.Error.Remedy.Commands[0] != "stop the provider CLI and retry when mutation_state is idle" || job.Error.State["provider"] != model.ProviderCodex {
+		t.Fatalf("job = %#v", job)
+	}
+	targets := checker.snapshot()
+	if len(targets) != 1 || targets[0] != (processcheck.Target{Provider: model.ProviderCodex, Home: home}) {
+		t.Fatalf("targets = %#v", targets)
+	}
+	if adapter.startCount() != 0 {
+		t.Fatalf("starts = %d", adapter.startCount())
 	}
 }
 

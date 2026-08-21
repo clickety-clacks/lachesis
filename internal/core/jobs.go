@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/clickety-clacks/lachesis/internal/model"
+	"github.com/clickety-clacks/lachesis/internal/processcheck"
 	"github.com/clickety-clacks/lachesis/internal/provider"
 	"github.com/clickety-clacks/lachesis/internal/store"
 	"github.com/clickety-clacks/lachesis/internal/teach"
@@ -275,6 +276,18 @@ func (j *JobManager) runOnboard(ctx context.Context, job *managedJob, accountID,
 		return
 	}
 	home := filepath.Join(j.service.stateDir, "providers", string(job.model.Provider), accountID)
+	if job.model.Provider == model.ProviderCodex {
+		busy, err := j.service.process.Busy(ctx, processcheck.Target{Provider: job.model.Provider, Home: home})
+		if err != nil || busy {
+			claimed := j.finishStart(job, nil, nil, "")
+			if claimed {
+				j.ensureStop(job)
+				return
+			}
+			j.failJob(job, teach.New(teach.CredentialStoreBusy, "The provider CLI is running or cannot be inspected.", "onboard", nil, map[string]any{"provider": job.model.Provider}, nil, "stop the provider CLI and retry when mutation_state is idle"))
+			return
+		}
+	}
 	if err := os.MkdirAll(home, 0700); err != nil {
 		j.finishStart(job, nil, providerHomeCleanupTarget{provider: job.model.Provider, home: home}, "")
 		j.failJob(job, teach.New(teach.CredentialCleanupPending, "The managed store could not be created.", "onboard", nil, map[string]any{"managed_path": home}, nil, "retry onboarding"))
@@ -372,7 +385,7 @@ func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row mode
 		j.failJob(job, teach.New(teach.CredentialCleanupPending, "The transaction directory could not be created.", "re-onboard", nil, nil, nil, "retry re-onboarding"))
 		return
 	}
-	busy, err := j.service.process.Busy(ctx, row.Provider)
+	busy, err := j.service.process.Busy(ctx, processcheck.Target{Provider: row.Provider, Home: row.Store.Home})
 	if err != nil || busy {
 		j.finishStart(job, nil, transactionCleanupTarget{path: tx}, "")
 		j.failJob(job, teach.New(teach.CredentialStoreBusy, "The provider CLI is running or cannot be inspected.", "re-onboard", nil, map[string]any{"provider": row.Provider}, nil, "stop the provider CLI and retry when mutation_state is idle"))
