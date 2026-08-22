@@ -88,7 +88,7 @@ func (c *Cache) Fetch(ctx context.Context, id string, fetch func(context.Context
 
 func waitForCacheClaim(ctx context.Context, claim *cacheClaim) bool {
 	if claim == nil {
-		return true
+		return ctx.Err() == nil
 	}
 	select {
 	case <-claim.done:

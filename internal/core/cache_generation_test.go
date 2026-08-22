@@ -193,6 +193,38 @@ func TestCacheLosingForegroundFetchWaitsForClearReplacement(t *testing.T) {
 	}
 }
 
+func TestCacheLosingFetchDoesNotRetryAfterContextCancellation(t *testing.T) {
+	cache := NewCache()
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	release := make(chan struct{})
+	result := make(chan cacheFetchResult, 1)
+	var calls atomic.Int32
+	go func() {
+		sample, detail, live := cache.Fetch(ctx, "account", func(context.Context) (*model.UsageSample, *model.ErrorDetail) {
+			if calls.Add(1) == 1 {
+				close(started)
+				<-release
+			}
+			return nil, nil
+		})
+		result <- cacheFetchResult{sample: sample, detail: detail, live: live}
+	}()
+	<-started
+
+	cache.Clear("account")
+	cancel()
+	close(release)
+
+	got := receiveCacheResult(t, result)
+	if got.sample != nil || got.detail == nil || got.detail.Code != "UPSTREAM_TIMEOUT" || got.live {
+		t.Fatalf("result = %#v", got)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("fetch calls = %d, want 1", calls.Load())
+	}
+}
+
 func TestCacheFailedReadPreservesStaleGeneration(t *testing.T) {
 	cache := NewCache()
 	reset := time.Unix(2_000, 0).UTC()
