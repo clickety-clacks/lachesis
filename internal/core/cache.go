@@ -68,17 +68,33 @@ func (c *Cache) Fetch(ctx context.Context, id string, fetch func(context.Context
 			return result.snapshot.sample, result.snapshot.err, false
 		}
 		if !result.applied {
-			select {
-			case <-result.inflight.done:
-				mutation = cacheResume
-				continue
-			case <-ctx.Done():
+			if !waitForCacheClaim(ctx, result.inflight) {
 				return nil, timeoutError(), false
 			}
+			mutation = cacheResume
+			continue
 		}
 		sample, detail := fetch(ctx)
 		finish := c.mutate(id, cacheFinish, claim, sample, detail)
-		return finish.snapshot.sample, finish.snapshot.err, finish.applied
+		if finish.applied || finish.snapshot.sample != nil || finish.snapshot.err != nil {
+			return finish.snapshot.sample, finish.snapshot.err, finish.applied
+		}
+		if !waitForCacheClaim(ctx, finish.inflight) {
+			return nil, timeoutError(), false
+		}
+		mutation = cacheResume
+	}
+}
+
+func waitForCacheClaim(ctx context.Context, claim *cacheClaim) bool {
+	if claim == nil {
+		return true
+	}
+	select {
+	case <-claim.done:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

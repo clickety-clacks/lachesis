@@ -128,6 +128,71 @@ func TestCacheSupersedingMutationWinsAndWakesWaiterOnce(t *testing.T) {
 	}
 }
 
+func TestCacheLosingForegroundFetchWaitsForClearReplacement(t *testing.T) {
+	cache := NewCache()
+	reset := time.Unix(2_000, 0).UTC()
+	old := generationSample("account", 23, reset, time.Unix(1_900, 0).UTC(), "old")
+	replacement := generationSample("account", 71, reset, time.Unix(2_075, 0).UTC(), "replacement")
+
+	ownerBase, cancelOwner := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelOwner()
+	ownerContext := &waitObservedContext{Context: ownerBase, waiting: make(chan struct{})}
+	ownerStarted := make(chan struct{})
+	releaseOwner := make(chan struct{})
+	ownerResult := make(chan cacheFetchResult, 1)
+	var ownerCalls atomic.Int32
+	go func() {
+		sample, detail, live := cache.Fetch(ownerContext, "account", func(context.Context) (*model.UsageSample, *model.ErrorDetail) {
+			ownerCalls.Add(1)
+			close(ownerStarted)
+			<-releaseOwner
+			return old, nil
+		})
+		ownerResult <- cacheFetchResult{sample: sample, detail: detail, live: live}
+	}()
+	<-ownerStarted
+
+	waiterBase, cancelWaiter := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelWaiter()
+	waiterContext := &waitObservedContext{Context: waiterBase, waiting: make(chan struct{})}
+	replacementStarted := make(chan struct{})
+	releaseReplacement := make(chan struct{})
+	waiterResult := make(chan cacheFetchResult, 1)
+	var waiterCalls atomic.Int32
+	go func() {
+		sample, detail, live := cache.Fetch(waiterContext, "account", func(context.Context) (*model.UsageSample, *model.ErrorDetail) {
+			waiterCalls.Add(1)
+			close(replacementStarted)
+			<-releaseReplacement
+			return replacement, nil
+		})
+		waiterResult <- cacheFetchResult{sample: sample, detail: detail, live: live}
+	}()
+	<-waiterContext.waiting
+
+	cache.Clear("account")
+	<-replacementStarted
+	close(releaseOwner)
+	<-ownerContext.waiting
+	select {
+	case early := <-ownerResult:
+		t.Fatalf("losing fetch returned before replacement publication: %#v", early)
+	default:
+	}
+
+	close(releaseReplacement)
+	owner := receiveCacheResult(t, ownerResult)
+	waiter := receiveCacheResult(t, waiterResult)
+	assertGeneration(t, owner.sample, replacement)
+	assertGeneration(t, waiter.sample, replacement)
+	if owner.detail != nil || owner.live || waiter.detail != nil || !waiter.live {
+		t.Fatalf("owner = %#v, waiter = %#v", owner, waiter)
+	}
+	if ownerCalls.Load() != 1 || waiterCalls.Load() != 1 {
+		t.Fatalf("owner calls = %d, waiter calls = %d", ownerCalls.Load(), waiterCalls.Load())
+	}
+}
+
 func TestCacheFailedReadPreservesStaleGeneration(t *testing.T) {
 	cache := NewCache()
 	reset := time.Unix(2_000, 0).UTC()
