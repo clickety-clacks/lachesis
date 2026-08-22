@@ -51,6 +51,33 @@ func TestNormalizePreservesValidRawResponse(t *testing.T) {
 	}
 }
 
+func TestNormalizeCurrentNestedAdditionalWindows(t *testing.T) {
+	raw := json.RawMessage(`{"rate_limit":{"primary_window":{"used_percent":10},"secondary_window":null},"additional_rate_limits":[{"limit_name":"Synthetic Feature","metered_feature":"synthetic","rate_limit":{"primary_window":{"used_percent":20,"reset_at":100,"limit_window_seconds":18000},"secondary_window":{"used_percent":30,"reset_at":200,"limit_window_seconds":604800}}}]}`)
+	sample, detail := normalize(raw, time.Unix(1, 0))
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	want := "primary,additional:synthetic-feature:primary,additional:synthetic-feature:secondary"
+	if got := strings.Join(windowIDs(sample.Windows), ","); got != want || len(sample.Diagnostics) != 0 || string(sample.Raw) != string(raw) {
+		t.Fatalf("window_ids=%s diagnostics=%#v raw_preserved=%t", got, sample.Diagnostics, string(sample.Raw) == string(raw))
+	}
+	if sample.Windows[1].Name != "Synthetic Feature Primary" || sample.Windows[2].Name != "Synthetic Feature Secondary" {
+		t.Fatalf("window names = %q, %q", sample.Windows[1].Name, sample.Windows[2].Name)
+	}
+}
+
+func TestNormalizeNestedAdditionalNullAndInvalidCandidates(t *testing.T) {
+	raw := json.RawMessage(`{"rate_limit":{"primary_window":{"used_percent":10}},"additional_rate_limits":[{"limit_name":"Synthetic Feature","rate_limit":{"primary_window":null,"secondary_window":{"used_percent":101}}}]}`)
+	sample, detail := normalize(raw, time.Unix(1, 0))
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	if got := strings.Join(windowIDs(sample.Windows), ","); got != "primary" || len(sample.Diagnostics) != 1 {
+		t.Fatalf("window_ids=%s diagnostics=%#v", got, sample.Diagnostics)
+	}
+	assertCodexDiagnostic(t, sample.Diagnostics[0])
+}
+
 func TestNormalizeKeepsUnnamedAdditionalWindowsStable(t *testing.T) {
 	raw := json.RawMessage(`{"rate_limit":{"primary_window":{"used_percent":10}},"additional_rate_limits":[{"name":"unnamed 2","rate_limit":{"used_percent":20}},{"name":"  ","rate_limit":{"used_percent":30}},{"rate_limit":{"used_percent":40}}]}`)
 	first, detail := normalize(raw, time.Unix(1, 0))

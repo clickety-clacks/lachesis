@@ -171,7 +171,7 @@ func normalize(raw json.RawMessage, observed time.Time) (*model.UsageSample, *mo
 				key, id, name string
 			}{{"primary_window", "primary", "Primary"}, {"secondary_window", "secondary", "Secondary"}} {
 				rawWindow, present := rate[candidate.key]
-				if !present {
+				if !present || jsonNull(rawWindow) {
 					continue
 				}
 				if w, ok := decodeWindow(candidate.id, candidate.name, rawWindow, observed); ok {
@@ -195,26 +195,56 @@ func normalize(raw json.RawMessage, observed time.Time) (*model.UsageSample, *mo
 		if !jsonArray(doc.Additional) || json.Unmarshal(doc.Additional, &entries) != nil {
 			diagnostics = append(diagnostics, codexWindowDiagnostic())
 		} else {
-			additional = make([]positionedLimit, 0, len(entries))
+			additional = make([]positionedLimit, 0, len(entries)*2)
 			for i, entry := range entries {
-				candidate := positionedLimit{position: i + 1, omitted: true}
 				var decoded struct {
-					Name  string          `json:"name"`
-					Limit json.RawMessage `json:"rate_limit"`
+					Name      string          `json:"name"`
+					LimitName string          `json:"limit_name"`
+					Limit     json.RawMessage `json:"rate_limit"`
 				}
-				if jsonObject(entry) && json.Unmarshal(entry, &decoded) == nil && len(decoded.Limit) > 0 {
-					candidate.name = decoded.Name
-					slugged := slug(decoded.Name)
-					candidate.id = "additional:" + slugged
-					displayName := decoded.Name
-					if slugged == "" {
-						candidate.id = fmt.Sprintf("additional:unnamed:%d", candidate.position)
-						displayName = fmt.Sprintf("Unnamed additional limit %d", candidate.position)
+				if !jsonObject(entry) || json.Unmarshal(entry, &decoded) != nil || len(decoded.Limit) == 0 || !jsonObject(decoded.Limit) {
+					additional = append(additional, positionedLimit{position: i + 1, omitted: true})
+					continue
+				}
+				name := decoded.LimitName
+				if name == "" {
+					name = decoded.Name
+				}
+				slugged := slug(name)
+				baseID := "additional:" + slugged
+				displayName := name
+				if slugged == "" {
+					baseID = fmt.Sprintf("additional:unnamed:%d", i+1)
+					displayName = fmt.Sprintf("Unnamed additional limit %d", i+1)
+				}
+
+				var limit map[string]json.RawMessage
+				if json.Unmarshal(decoded.Limit, &limit) != nil {
+					additional = append(additional, positionedLimit{position: i + 1, omitted: true})
+					continue
+				}
+				_, nestedPrimary := limit["primary_window"]
+				_, nestedSecondary := limit["secondary_window"]
+				if nestedPrimary || nestedSecondary {
+					for _, nested := range []struct{ key, suffix, label string }{{"primary_window", "primary", "Primary"}, {"secondary_window", "secondary", "Secondary"}} {
+						rawWindow, present := limit[nested.key]
+						if !present || jsonNull(rawWindow) {
+							continue
+						}
+						candidate := positionedLimit{position: i + 1, name: name, id: baseID + ":" + nested.suffix, omitted: true}
+						if w, ok := decodeWindow(candidate.id, displayName+" "+nested.label, rawWindow, observed); ok {
+							candidate.window = w
+							candidate.omitted = false
+						}
+						additional = append(additional, candidate)
 					}
-					if w, ok := decodeWindow(candidate.id, displayName, decoded.Limit, observed); ok {
-						candidate.window = w
-						candidate.omitted = false
-					}
+					continue
+				}
+
+				candidate := positionedLimit{position: i + 1, name: name, id: baseID, omitted: true}
+				if w, ok := decodeWindow(candidate.id, displayName, decoded.Limit, observed); ok {
+					candidate.window = w
+					candidate.omitted = false
 				}
 				additional = append(additional, candidate)
 			}
@@ -286,6 +316,9 @@ func jsonObject(raw json.RawMessage) bool {
 func jsonArray(raw json.RawMessage) bool {
 	trimmed := strings.TrimSpace(string(raw))
 	return len(trimmed) > 0 && trimmed[0] == '['
+}
+func jsonNull(raw json.RawMessage) bool {
+	return strings.TrimSpace(string(raw)) == "null"
 }
 func codexWindowDiagnostic() model.Diagnostic {
 	return model.Diagnostic{Code: "CODEX_USAGE_WINDOW_OMITTED", Message: "Codex omitted an invalid or unrecognized usage window."}
