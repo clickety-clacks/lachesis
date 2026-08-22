@@ -463,15 +463,15 @@ func (s *Service) usageResult(ctx context.Context, row model.RegistryAccount, mo
 	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	got, detail, started := s.cache.Fetch(waitCtx, row.ID, func(ctx context.Context) (*model.UsageSample, *model.ErrorDetail) { return s.fetchAccount(ctx, row) })
-	if got != nil && detail == nil {
+	if got != nil {
+		if detail != nil {
+			return model.UsageResult{AccountID: row.ID, Status: "stale", Sample: got, Error: detail}
+		}
 		status := "cache"
 		if started {
 			status = "live"
 		}
 		return model.UsageResult{AccountID: row.ID, Status: status, Sample: got}
-	}
-	if sample != nil {
-		return model.UsageResult{AccountID: row.ID, Status: "stale", Sample: sample, Error: detail}
 	}
 	return model.UsageResult{AccountID: row.ID, Status: "error", Error: detail}
 }
