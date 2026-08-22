@@ -60,6 +60,17 @@ func TestSanitizedRealUsageFixtures(t *testing.T) {
 		if detail != nil || sample == nil || string(sample.Raw) != string(fixture.Response) {
 			t.Fatalf("normalize fixture %s: sample=%#v detail=%#v", path, sample, detail)
 		}
+		if filepath.Base(path) == "claude-usage-current-schema-sanitized-real.json" {
+			if got := claudeWindowIDs(sample.Windows); len(got) != 2 || got[0] != "five_hour" || got[1] != "seven_day" {
+				t.Fatalf("fixture %s windows = %v", path, got)
+			}
+			if sample.Windows[0].WindowSeconds == nil || *sample.Windows[0].WindowSeconds != 5*60*60 || sample.Windows[1].WindowSeconds == nil || *sample.Windows[1].WindowSeconds != 7*24*60*60 {
+				t.Fatalf("fixture %s durations = %#v", path, sample.Windows)
+			}
+			if len(sample.Diagnostics) != 3 {
+				t.Fatalf("fixture %s diagnostics = %#v", path, sample.Diagnostics)
+			}
+		}
 		if len(sample.Windows) == 0 || len(sample.Diagnostics) == 0 {
 			t.Fatalf("fixture %s did not exercise valid-window retention with additional-window degradation: windows=%d diagnostics=%d", path, len(sample.Windows), len(sample.Diagnostics))
 		}

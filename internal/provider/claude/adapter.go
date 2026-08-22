@@ -169,13 +169,15 @@ func normalize(raw json.RawMessage, observed time.Time) (*model.UsageSample, *mo
 	diagnostics := []model.Diagnostic{}
 	seen := map[string]bool{}
 	for _, candidate := range []struct {
-		id, name string
-		raw      json.RawMessage
-	}{{"five_hour", "Five hour", doc.Five}, {"seven_day", "Seven day", doc.Seven}, {"seven_day_sonnet", "Seven day Sonnet", doc.Sonnet}} {
-		if len(candidate.raw) == 0 {
+		id, name      string
+		windowSeconds int64
+		raw           json.RawMessage
+	}{{"five_hour", "Five hour", 5 * 60 * 60, doc.Five}, {"seven_day", "Seven day", 7 * 24 * 60 * 60, doc.Seven}, {"seven_day_sonnet", "Seven day Sonnet", 7 * 24 * 60 * 60, doc.Sonnet}} {
+		if jsonAbsent(candidate.raw) {
 			continue
 		}
 		if w, ok := decodeBucket(candidate.id, candidate.name, candidate.raw); ok {
+			w.WindowSeconds = &candidate.windowSeconds
 			windows = append(windows, w)
 			seen[candidate.id] = true
 		} else {
@@ -250,6 +252,10 @@ func jsonObject(raw json.RawMessage) bool {
 func jsonArray(raw json.RawMessage) bool {
 	trimmed := strings.TrimSpace(string(raw))
 	return len(trimmed) > 0 && trimmed[0] == '['
+}
+func jsonAbsent(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return trimmed == "" || trimmed == "null"
 }
 func claudeWindowDiagnostic() model.Diagnostic {
 	return model.Diagnostic{Code: "CLAUDE_USAGE_WINDOW_OMITTED", Message: "Claude omitted an invalid or unrecognized usage window."}

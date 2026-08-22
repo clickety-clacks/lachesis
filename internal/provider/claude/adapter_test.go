@@ -60,6 +60,31 @@ func TestNormalizeAcceptsFractionalAndPercentScaleBuckets(t *testing.T) {
 	if len(sample.Windows) != 3 || sample.Windows[0].UsedPercent != 25 || sample.Windows[1].UsedPercent != 25 || sample.Windows[2].UsedPercent != 100 || len(sample.Diagnostics) != 0 || string(sample.Raw) != string(raw) {
 		t.Fatalf("sample = %#v", sample)
 	}
+	if *sample.Windows[0].WindowSeconds != 5*60*60 || *sample.Windows[1].WindowSeconds != 7*24*60*60 || *sample.Windows[2].WindowSeconds != 7*24*60*60 {
+		t.Fatalf("window durations = %#v", sample.Windows)
+	}
+}
+
+func TestNormalizeTreatsNullFixedBucketsAsAbsent(t *testing.T) {
+	raw := json.RawMessage(`{"five_hour":{"utilization":0.25},"seven_day":null,"seven_day_sonnet":null}`)
+	sample, detail := normalize(raw, time.Unix(1, 0))
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	if got := strings.Join(claudeWindowIDs(sample.Windows), ","); got != "five_hour" || len(sample.Diagnostics) != 0 || string(sample.Raw) != string(raw) {
+		t.Fatalf("window_ids=%v diagnostics=%#v raw_preserved=%t", claudeWindowIDs(sample.Windows), sample.Diagnostics, string(sample.Raw) == string(raw))
+	}
+}
+
+func TestNormalizeLeavesOpaqueTopLevelBucketRawOnly(t *testing.T) {
+	raw := json.RawMessage(`{"five_hour":{"utilization":0.25},"nimbus_quill":{"utilization":0.5,"resets_at":null}}`)
+	sample, detail := normalize(raw, time.Unix(1, 0))
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	if got := strings.Join(claudeWindowIDs(sample.Windows), ","); got != "five_hour" || len(sample.Diagnostics) != 0 || string(sample.Raw) != string(raw) {
+		t.Fatalf("window_ids=%v diagnostics=%#v raw_preserved=%t", claudeWindowIDs(sample.Windows), sample.Diagnostics, string(sample.Raw) == string(raw))
+	}
 }
 
 func TestNormalizeCombinesFixedAndMapLimitsWithLocalDegradation(t *testing.T) {
