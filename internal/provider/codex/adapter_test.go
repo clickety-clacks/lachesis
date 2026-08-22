@@ -78,6 +78,32 @@ func TestNormalizeNestedAdditionalNullAndInvalidCandidates(t *testing.T) {
 	assertCodexDiagnostic(t, sample.Diagnostics[0])
 }
 
+func TestNormalizeSelectsNameAfterAdditionalFormat(t *testing.T) {
+	raw := json.RawMessage(`{"rate_limit":{"primary_window":{"used_percent":10}},"additional_rate_limits":[{"name":"Legacy Name","limit_name":"Nested Name","rate_limit":{"used_percent":20}},{"name":"Legacy Name","rate_limit":{"primary_window":{"used_percent":30}}}]}`)
+	sample, detail := normalize(raw, time.Unix(1, 0))
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	want := "primary,additional:unnamed:2:primary,additional:legacy-name"
+	if got := strings.Join(windowIDs(sample.Windows), ","); got != want || len(sample.Diagnostics) != 0 {
+		t.Fatalf("window_ids=%s diagnostics=%#v", got, sample.Diagnostics)
+	}
+	if sample.Windows[1].Name != "Unnamed additional limit 2 Primary" || sample.Windows[2].Name != "Legacy Name" {
+		t.Fatalf("window names = %q, %q", sample.Windows[1].Name, sample.Windows[2].Name)
+	}
+}
+
+func TestNormalizeTreatsNullLegacyAdditionalLimitAsAbsent(t *testing.T) {
+	raw := json.RawMessage(`{"rate_limit":{"primary_window":{"used_percent":10}},"additional_rate_limits":[{"name":"Absent","rate_limit":null}]}`)
+	sample, detail := normalize(raw, time.Unix(1, 0))
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	if got := strings.Join(windowIDs(sample.Windows), ","); got != "primary" || len(sample.Diagnostics) != 0 {
+		t.Fatalf("window_ids=%s diagnostics=%#v", got, sample.Diagnostics)
+	}
+}
+
 func TestNormalizeKeepsUnnamedAdditionalWindowsStable(t *testing.T) {
 	raw := json.RawMessage(`{"rate_limit":{"primary_window":{"used_percent":10}},"additional_rate_limits":[{"name":"unnamed 2","rate_limit":{"used_percent":20}},{"name":"  ","rate_limit":{"used_percent":30}},{"rate_limit":{"used_percent":40}}]}`)
 	first, detail := normalize(raw, time.Unix(1, 0))

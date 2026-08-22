@@ -202,20 +202,16 @@ func normalize(raw json.RawMessage, observed time.Time) (*model.UsageSample, *mo
 					LimitName string          `json:"limit_name"`
 					Limit     json.RawMessage `json:"rate_limit"`
 				}
-				if !jsonObject(entry) || json.Unmarshal(entry, &decoded) != nil || len(decoded.Limit) == 0 || !jsonObject(decoded.Limit) {
+				if !jsonObject(entry) || json.Unmarshal(entry, &decoded) != nil || len(decoded.Limit) == 0 {
 					additional = append(additional, positionedLimit{position: i + 1, omitted: true})
 					continue
 				}
-				name := decoded.LimitName
-				if name == "" {
-					name = decoded.Name
+				if jsonNull(decoded.Limit) {
+					continue
 				}
-				slugged := slug(name)
-				baseID := "additional:" + slugged
-				displayName := name
-				if slugged == "" {
-					baseID = fmt.Sprintf("additional:unnamed:%d", i+1)
-					displayName = fmt.Sprintf("Unnamed additional limit %d", i+1)
+				if !jsonObject(decoded.Limit) {
+					additional = append(additional, positionedLimit{position: i + 1, omitted: true})
+					continue
 				}
 
 				var limit map[string]json.RawMessage
@@ -226,6 +222,8 @@ func normalize(raw json.RawMessage, observed time.Time) (*model.UsageSample, *mo
 				_, nestedPrimary := limit["primary_window"]
 				_, nestedSecondary := limit["secondary_window"]
 				if nestedPrimary || nestedSecondary {
+					name := decoded.LimitName
+					baseID, displayName := additionalIdentity(name, i+1)
 					for _, nested := range []struct{ key, suffix, label string }{{"primary_window", "primary", "Primary"}, {"secondary_window", "secondary", "Secondary"}} {
 						rawWindow, present := limit[nested.key]
 						if !present || jsonNull(rawWindow) {
@@ -241,6 +239,8 @@ func normalize(raw json.RawMessage, observed time.Time) (*model.UsageSample, *mo
 					continue
 				}
 
+				name := decoded.Name
+				baseID, displayName := additionalIdentity(name, i+1)
 				candidate := positionedLimit{position: i + 1, name: name, id: baseID, omitted: true}
 				if w, ok := decodeWindow(candidate.id, displayName, decoded.Limit, observed); ok {
 					candidate.window = w
@@ -319,6 +319,13 @@ func jsonArray(raw json.RawMessage) bool {
 }
 func jsonNull(raw json.RawMessage) bool {
 	return strings.TrimSpace(string(raw)) == "null"
+}
+func additionalIdentity(name string, position int) (string, string) {
+	slugged := slug(name)
+	if slugged == "" {
+		return fmt.Sprintf("additional:unnamed:%d", position), fmt.Sprintf("Unnamed additional limit %d", position)
+	}
+	return "additional:" + slugged, name
 }
 func codexWindowDiagnostic() model.Diagnostic {
 	return model.Diagnostic{Code: "CODEX_USAGE_WINDOW_OMITTED", Message: "Codex omitted an invalid or unrecognized usage window."}
