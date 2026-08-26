@@ -32,8 +32,9 @@ func main() {
 	fs.SetOutput(ioDiscard{})
 	home, _ := os.UserHomeDir()
 	stateDir := fs.String("state-dir", filepath.Join(home, "Library", "Application Support", "Lachesis"), "absolute state directory")
-	if fs.Parse(os.Args[2:]) != nil || fs.NArg() != 0 || !filepath.IsAbs(*stateDir) {
-		startupError(teach.New(teach.InvalidRequest, "serve accepts only --state-dir with an absolute path.", "health", nil, map[string]any{}, nil, "run lachesis serve --state-dir /absolute/path"))
+	listenPort := fs.Int("listen-port", 7843, "loopback listen port")
+	if fs.Parse(os.Args[2:]) != nil || fs.NArg() != 0 || !filepath.IsAbs(*stateDir) || *listenPort < 0 || *listenPort > 65535 {
+		startupError(teach.New(teach.InvalidRequest, "serve accepts only --state-dir with an absolute path and --listen-port from 0 through 65535.", "health", nil, map[string]any{}, nil, "run lachesis serve --state-dir /absolute/path"))
 		os.Exit(2)
 	}
 	svc, d := core.OpenService(*stateDir, []provider.Adapter{codex.New(nil), claude.New(nil)}, processcheck.PS{})
@@ -45,9 +46,10 @@ func main() {
 	defer stop()
 	svc.Start(ctx)
 	defer svc.Close()
-	listener, err := net.Listen("tcp4", "127.0.0.1:7843")
+	address := fmt.Sprintf("127.0.0.1:%d", *listenPort)
+	listener, err := net.Listen("tcp4", address)
 	if err != nil {
-		startupError(teach.New(teach.UpstreamUnavailable, "The loopback listener could not start.", "health", nil, map[string]any{"address": "127.0.0.1:7843"}, nil, "stop the existing listener and retry"))
+		startupError(teach.New(teach.UpstreamUnavailable, "The loopback listener could not start.", "health", nil, map[string]any{"address": address}, nil, "stop the existing listener and retry"))
 		os.Exit(1)
 	}
 	server := &http.Server{Handler: api.New(svc).Handler(), ReadHeaderTimeout: 5 * time.Second}
