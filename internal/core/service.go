@@ -665,7 +665,7 @@ func (s *Service) Health() map[string]any {
 			status = "degraded"
 		}
 	}
-	return map[string]any{"status": status, "version": "0.1.0", "providers": providers, "links": map[string]string{"accounts": "/api/v1/accounts", "usage": "/api/v1/usage", "help": "/api/v1/help"}}
+	return map[string]any{"status": status, "providers": providers, "links": map[string]string{"accounts": "/api/v1/accounts", "usage": "/api/v1/usage", "help": "/api/v1/help"}}
 }
 
 func validateAccountInput(p model.Provider, label string) *model.ErrorDetail {

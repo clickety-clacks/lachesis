@@ -15,12 +15,18 @@ import (
 )
 
 type Server struct {
-	service *core.Service
-	mux     *http.ServeMux
+	service   *core.Service
+	buildInfo BuildInfo
+	mux       *http.ServeMux
 }
 
-func New(service *core.Service) *Server {
-	s := &Server{service: service, mux: http.NewServeMux()}
+type BuildInfo struct {
+	Version string
+	Commit  string
+}
+
+func New(service *core.Service, buildInfo BuildInfo) *Server {
+	s := &Server{service: service, buildInfo: buildInfo, mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -32,7 +38,12 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) routes() {
-	s.mux.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) { write(w, http.StatusOK, s.service.Health()) })
+	s.mux.HandleFunc("GET /api/v1/health", func(w http.ResponseWriter, r *http.Request) {
+		health := s.service.Health()
+		health["version"] = s.buildInfo.Version
+		health["commit"] = s.buildInfo.Commit
+		write(w, http.StatusOK, health)
+	})
 	s.mux.HandleFunc("GET /api/v1/help", s.helpIndex)
 	s.mux.HandleFunc("GET /api/v1/help/{topic}", s.helpTopic)
 	s.mux.HandleFunc("GET /api/v1/accounts", func(w http.ResponseWriter, r *http.Request) {

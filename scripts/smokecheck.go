@@ -28,6 +28,7 @@ type providerHealth struct {
 type healthResponse struct {
 	Status    string                    `json:"status"`
 	Version   string                    `json:"version"`
+	Commit    string                    `json:"commit"`
 	Providers map[string]providerHealth `json:"providers"`
 	Links     map[string]string         `json:"links"`
 }
@@ -57,14 +58,18 @@ type errorResponse struct {
 }
 
 func main() {
-	if len(os.Args) != 2 {
-		fatalf("usage: smokecheck base-url")
+	if len(os.Args) != 2 && len(os.Args) != 4 {
+		fatalf("usage: smokecheck base-url [version commit]")
+	}
+	wantVersion, wantCommit := "development", "unknown"
+	if len(os.Args) == 4 {
+		wantVersion, wantCommit = os.Args[2], os.Args[3]
 	}
 	base := strings.TrimRight(os.Args[1], "/")
 	var health healthResponse
 	healthRaw := get(base+"/api/v1/health", http.StatusOK, &health)
-	if health.Status != "ready" || health.Version != "0.1.0" {
-		fatalf("invalid health status or version")
+	if health.Status != "ready" || health.Version != wantVersion || health.Commit != wantCommit {
+		fatalf("invalid health status, version, or commit")
 	}
 	if len(health.Providers) != 2 || health.Providers["codex"].Accounts.Total != 0 || health.Providers["claude"].Accounts.Total != 0 {
 		fatalf("invalid empty-registry provider health")

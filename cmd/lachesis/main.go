@@ -23,6 +23,11 @@ import (
 	"github.com/clickety-clacks/lachesis/internal/teach"
 )
 
+var (
+	buildVersion = "development"
+	buildCommit  = "unknown"
+)
+
 func main() {
 	if len(os.Args) < 2 || os.Args[1] != "serve" {
 		startupError(teach.New(teach.InvalidRequest, "The command must be serve.", "health", nil, map[string]any{}, nil, "run lachesis serve"))
@@ -52,7 +57,7 @@ func main() {
 		startupError(teach.New(teach.UpstreamUnavailable, "The loopback listener could not start.", "health", nil, map[string]any{"address": address}, nil, "stop the existing listener and retry"))
 		os.Exit(1)
 	}
-	server := &http.Server{Handler: api.New(svc).Handler(), ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{Handler: api.New(svc, api.BuildInfo{Version: buildVersion, Commit: buildCommit}).Handler(), ReadHeaderTimeout: 5 * time.Second}
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()
 	select {
