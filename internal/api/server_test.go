@@ -29,6 +29,30 @@ func (checker) Busy(_ context.Context, _ processcheck.Target) (bool, error) { re
 type readError struct{}
 
 func (readError) Read([]byte) (int, error) { return 0, errors.New("synthetic read failure") }
+
+func TestHealthReportsBuildInfo(t *testing.T) {
+	svc, d := core.OpenService(t.TempDir(), nil, checker{})
+	if d != nil {
+		t.Fatal(d)
+	}
+	defer svc.Close()
+	rr := httptest.NewRecorder()
+	New(svc, BuildInfo{Version: "test-version", Commit: "test-commit"}).Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/health", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status %d", rr.Code)
+	}
+	var health struct {
+		Version string `json:"version"`
+		Commit  string `json:"commit"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &health); err != nil {
+		t.Fatal(err)
+	}
+	if health.Version != "test-version" || health.Commit != "test-commit" {
+		t.Fatalf("build info = %q, %q", health.Version, health.Commit)
+	}
+}
+
 func TestEmptyUsageTeaches(t *testing.T) {
 	svc, d := core.OpenService(t.TempDir(), nil, checker{})
 	if d != nil {
@@ -36,7 +60,7 @@ func TestEmptyUsageTeaches(t *testing.T) {
 	}
 	defer svc.Close()
 	rr := httptest.NewRecorder()
-	New(svc).Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/usage", nil))
+	New(svc, BuildInfo{}).Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/usage", nil))
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("status %d", rr.Code)
 	}
@@ -54,7 +78,7 @@ func TestKeychainAdoptionReturnsStructuralFileOnlyRemedy(t *testing.T) {
 	defer svc.Close()
 	body := `{"provider":"claude","label":"work","source":{"kind":"keychain","service":"legacy","account":"default"}}`
 	rr := httptest.NewRecorder()
-	New(svc).Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/accounts/adopt", strings.NewReader(body)))
+	New(svc, BuildInfo{}).Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/accounts/adopt", strings.NewReader(body)))
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
 	}
@@ -172,7 +196,7 @@ func TestCancelJobEndpoint(t *testing.T) {
 		t.Fatalf("active job = %#v", active)
 	}
 	rr := httptest.NewRecorder()
-	New(svc).Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+job.ID+"/cancel", nil))
+	New(svc, BuildInfo{}).Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+job.ID+"/cancel", nil))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
 	}
@@ -182,7 +206,7 @@ func TestCancelJobEndpoint(t *testing.T) {
 	}
 	updated := canceled.UpdatedAt
 	rr = httptest.NewRecorder()
-	New(svc).Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+job.ID+"/cancel", nil))
+	New(svc, BuildInfo{}).Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+job.ID+"/cancel", nil))
 	if rr.Code != http.StatusOK || json.Unmarshal(rr.Body.Bytes(), &canceled) != nil || !canceled.UpdatedAt.Equal(updated) {
 		t.Fatalf("repeat status %d: %s", rr.Code, rr.Body.String())
 	}
@@ -196,7 +220,7 @@ func TestSubmitClaudeJobCodeEndpointCompletesOnboardingWithoutReturningCode(t *t
 		t.Fatal(detail)
 	}
 	defer svc.Close()
-	handler := New(svc).Handler()
+	handler := New(svc, BuildInfo{}).Handler()
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/v1/accounts", strings.NewReader(`{"provider":"claude","label":"work"}`)))
 	if rr.Code != http.StatusAccepted {
@@ -270,7 +294,7 @@ func TestCancelJobEndpointRejectsBodyAndMissingJob(t *testing.T) {
 		t.Fatal(detail)
 	}
 	defer svc.Close()
-	handler := New(svc).Handler()
+	handler := New(svc, BuildInfo{}).Handler()
 	for name, body := range map[string]string{
 		"zero bytes":           "",
 		"ASCII whitespace":     " \t\r\n",
