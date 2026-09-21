@@ -416,6 +416,7 @@ func (j *JobManager) runOnboard(ctx context.Context, job *managedJob, accountID,
 		sample.AccountID = accountID
 		sample.Label = label
 		j.service.cache.Install(accountID, *sample)
+		j.service.recordUsage(accountID, *sample)
 	}
 	j.completeSuccess(job, row, detail)
 }
@@ -506,6 +507,12 @@ func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row mode
 		j.failJob(job, teach.New(teach.CredentialCommitFailed, "The original store cannot be read.", "re-onboard", nil, map[string]any{"store_kind": row.Store.Kind}, []model.RemedyCall{{Method: "POST", Path: "/api/v1/accounts/" + row.ID + "/verify"}}))
 		return
 	}
+	// Clear before replacing the credential. A failed purge must leave the old
+	// provider identity and its history together.
+	if err := j.service.clearUsageHistory(row.ID); err != nil {
+		j.failJob(job, teach.New(teach.RegistryCommitFailed, "The account usage history could not be reset before re-onboarding.", "health", nil, map[string]any{"account_id": row.ID, "error": err.Error()}, nil, "preserve the history file and retry re-onboarding"))
+		return
+	}
 	if j.beforeCommit != nil {
 		j.beforeCommit(job)
 	}
@@ -531,7 +538,10 @@ func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row mode
 		return
 	}
 	if sample != nil {
+		sample.AccountID = row.ID
+		sample.Label = row.Label
 		j.service.cache.Install(row.ID, *sample)
+		j.service.recordUsage(row.ID, *sample)
 	}
 	if err := j.removeTransactionOnce(transactionCleanupTarget{path: tx}); err != nil {
 		j.recordFailure(job, teach.New(teach.CredentialCleanupPending, "The re-onboard transaction could not be removed.", "jobs", nil, map[string]any{"job_id": job.model.ID, "transaction_path": tx}, j.jobRemedyCalls(job)))

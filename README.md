@@ -21,3 +21,24 @@ Run:
 ```
 
 The service listens only on `127.0.0.1:7843`. Start with `GET /api/v1/help`.
+
+Lachesis records normalized usage observations in `usage-history.json` under the
+state directory. It keeps a bounded seven-day history after installation, with
+no cache backfill. Read an account's samples at
+`/api/v1/accounts/{id}/usage/history` and its 24-hour and 48-hour per-window
+forecast at `/api/v1/accounts/{id}/usage/forecast`. Forecasts report coverage,
+sample counts, reset boundaries, stale and reauthentication states, and leave
+zero-burn or insufficient history without a finite exhaustion estimate.
+
+While the service runs, it samples about every 15 minutes. Each successful fresh
+usage read also records an observation. Forecast requests use the stored history
+and never trigger a provider read. The default estimate uses up to 48 hours and
+shows a 24-hour comparison; at least one hour of observed coverage is needed for
+a useful burn estimate. Flat intervals at 100 percent are censored demand, so
+rates use observed uncapped intervals and qualify the unknown demand while capped.
+The aggregate forecast at `/api/v1/usage/forecast` keeps comparable provider,
+plan, window, and duration pools separate and reports incomplete capacity when
+an account has stale usage, missing history, or an unknown limit. Its pooled
+estimate assumes switching work between accounts with the same known plan and
+window capacity. Overlapping limits can strand capacity, so pooled runway is an
+optimistic capacity estimate rather than a routing guarantee.

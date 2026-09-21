@@ -34,20 +34,23 @@ type runtimeAccount struct {
 }
 
 type Service struct {
-	stateDir string
-	registry *RegistryStore
-	cache    *Cache
-	adapters map[model.Provider]provider.Adapter
-	stores   StoreFactory
-	process  processcheck.Checker
-	mu       sync.RWMutex
-	state    map[string]*runtimeAccount
-	jobs     *JobManager
-	now      func() time.Time
-	cancel   context.CancelFunc
-	eventMu  sync.Mutex
-	events   io.Writer
-	lstat    func(string) (os.FileInfo, error)
+	stateDir   string
+	registry   *RegistryStore
+	cache      *Cache
+	history    *UsageHistoryStore
+	adapters   map[model.Provider]provider.Adapter
+	stores     StoreFactory
+	process    processcheck.Checker
+	mu         sync.RWMutex
+	state      map[string]*runtimeAccount
+	jobs       *JobManager
+	now        func() time.Time
+	cancel     context.CancelFunc
+	eventMu    sync.Mutex
+	events     io.Writer
+	lstat      func(string) (os.FileInfo, error)
+	historyMu  sync.RWMutex
+	historyErr error
 }
 
 func OpenService(stateDir string, adapters []provider.Adapter, checker processcheck.Checker) (*Service, *model.ErrorDetail) {
@@ -59,7 +62,11 @@ func openService(stateDir string, adapters []provider.Adapter, checker processch
 	if err != nil {
 		return nil, teach.New(teach.RegistryCommitFailed, "The registry cannot be opened.", "health", nil, map[string]any{"registry_path": filepath.Join(stateDir, "accounts.json")}, nil, "fix the registry before restart")
 	}
-	s := &Service{stateDir: stateDir, registry: reg, cache: NewCache(), adapters: map[model.Provider]provider.Adapter{}, process: checker, state: map[string]*runtimeAccount{}, now: time.Now, events: events, lstat: lstat}
+	history, historyErr := openUsageHistory(stateDir)
+	if historyErr != nil {
+		return nil, teach.New(teach.RegistryCommitFailed, "Usage history cannot be opened.", "health", nil, map[string]any{"history_path": filepath.Join(stateDir, "usage-history.json"), "error": historyErr.Error()}, nil, "preserve the history file and fix it before restart")
+	}
+	s := &Service{stateDir: stateDir, registry: reg, cache: NewCache(), history: history, adapters: map[model.Provider]provider.Adapter{}, process: checker, state: map[string]*runtimeAccount{}, now: time.Now, events: events, lstat: lstat}
 	for _, a := range adapters {
 		s.adapters[a.Name()] = a
 	}
@@ -87,7 +94,47 @@ func (s *Service) SetStoreFactoryForTests(f StoreFactory) { s.stores = f }
 func (s *Service) SetClockForTests(now func() time.Time) {
 	s.now = now
 	s.cache.now = now
+	s.history.SetClockForTests(now)
 	s.jobs.now = now
+}
+
+func (s *Service) recordUsage(id string, sample model.UsageSample) {
+	if s.history == nil {
+		return
+	}
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	if err := s.history.Append(id, sample); err != nil {
+		if errors.Is(err, errUsageHistoryUnchanged) {
+			return
+		}
+		s.historyErr = err
+		return
+	}
+	s.historyErr = nil
+}
+
+func (s *Service) clearUsageHistory(id string) error {
+	if s.history == nil {
+		return nil
+	}
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
+	err := s.history.Reset(id)
+	if errors.Is(err, errUsageHistoryUnchanged) {
+		return nil
+	}
+	s.historyErr = err
+	return err
+}
+
+func (s *Service) historyErrorString() string {
+	s.historyMu.RLock()
+	defer s.historyMu.RUnlock()
+	if s.historyErr == nil {
+		return ""
+	}
+	return s.historyErr.Error()
 }
 
 func (s *Service) Jobs() *JobManager { return s.jobs }
@@ -259,6 +306,7 @@ func (s *Service) Adopt(ctx context.Context, p model.Provider, label string, bin
 	sample.AccountID = id
 	sample.Label = row.Label
 	s.cache.Install(id, *sample)
+	s.recordUsage(id, *sample)
 	now := s.now().UTC()
 	s.setResult(id, model.StatusReady, &now, nil)
 	return s.accountView(row), nil
@@ -277,6 +325,7 @@ func (s *Service) Verify(ctx context.Context, id string) (model.Account, *model.
 		return model.Account{}, d
 	}
 	s.cache.Install(id, *sample)
+	s.recordUsage(id, *sample)
 	r.mu.Lock()
 	r.status = model.StatusReady
 	r.checked = &now
@@ -373,6 +422,7 @@ func (s *Service) Refresh(ctx context.Context, id string) (model.Account, *model
 	sample.AccountID = id
 	sample.Label = row.Label
 	s.cache.Install(id, *sample)
+	s.recordUsage(id, *sample)
 	r.mu.Lock()
 	r.status = model.StatusReady
 	r.checked = &now
@@ -392,6 +442,9 @@ func (s *Service) Delete(id string) *model.ErrorDetail {
 	r.mu.Unlock()
 	if mutation != model.MutationIdle {
 		return teach.New(teach.JobActive, "An account mutation is active.", "accounts", nil, map[string]any{"account_id": row.ID}, nil, "wait for the active job")
+	}
+	if err := s.clearUsageHistory(id); err != nil {
+		return teach.New(teach.RegistryCommitFailed, "Account usage history could not be purged.", "health", nil, map[string]any{"account_id": id, "history_path": filepath.Join(s.stateDir, "usage-history.json"), "error": err.Error()}, nil, "preserve the history file and retry cleanup")
 	}
 	ok, err := s.registry.Remove(id)
 	if err != nil {
@@ -418,6 +471,19 @@ func (s *Service) Usage(ctx context.Context, id, mode string) (model.UsageResult
 	}
 	return result, nil
 }
+
+func (s *Service) History(id string) (model.UsageHistory, *model.ErrorDetail) {
+	row, ok := s.registry.Find(id)
+	if !ok {
+		return model.UsageHistory{}, teach.AccountMissing(id, s.KnownIDs())
+	}
+	history, found := s.history.Get(id)
+	if !found {
+		return model.UsageHistory{AccountID: id, Provider: row.Provider, Samples: []model.UsageHistorySample{}}, nil
+	}
+	return history, nil
+}
+
 func (s *Service) Aggregate(ctx context.Context, mode string) (model.AggregateUsage, *model.ErrorDetail) {
 	rows := s.registry.Snapshot().Accounts
 	if len(rows) == 0 {
@@ -529,6 +595,9 @@ func (s *Service) fetchAccount(ctx context.Context, row model.RegistryAccount) (
 	}
 	r.op.Lock()
 	defer r.op.Unlock()
+	if current, exists := s.registry.Find(row.ID); !exists || current.ID != row.ID {
+		return nil, teach.AccountMissing(row.ID, s.KnownIDs())
+	}
 	sample, detail := s.fetchDirect(ctx, row)
 	now := s.now().UTC()
 	if detail != nil {
@@ -540,6 +609,7 @@ func (s *Service) fetchAccount(ctx context.Context, row model.RegistryAccount) (
 	r.checked = &now
 	r.lastErr = nil
 	r.mu.Unlock()
+	s.recordUsage(row.ID, *sample)
 	return sample, nil
 }
 
@@ -590,7 +660,9 @@ func (s *Service) commitError(r *runtimeAccount, err error) *model.ErrorDetail {
 }
 func (s *Service) scheduler(ctx context.Context) {
 	ticker := time.NewTicker(time.Minute)
+	usageTicker := time.NewTicker(15 * time.Minute)
 	defer ticker.Stop()
+	defer usageTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -599,6 +671,15 @@ func (s *Service) scheduler(ctx context.Context) {
 			for _, row := range s.registry.Snapshot().Accounts {
 				row := row
 				go s.refreshIfDue(ctx, row)
+			}
+		case <-usageTicker.C:
+			for _, row := range s.registry.Snapshot().Accounts {
+				row := row
+				go func() {
+					_, _, _ = s.cache.Fetch(ctx, row.ID, func(fetchCtx context.Context) (*model.UsageSample, *model.ErrorDetail) {
+						return s.fetchAccount(fetchCtx, row)
+					})
+				}()
 			}
 		}
 	}
