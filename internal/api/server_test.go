@@ -70,6 +70,26 @@ func TestEmptyUsageTeaches(t *testing.T) {
 	}
 }
 
+func TestUsageHistoryAndForecastMissingAccountEndpoints(t *testing.T) {
+	svc, d := core.OpenService(t.TempDir(), nil, checker{})
+	if d != nil {
+		t.Fatal(d)
+	}
+	defer svc.Close()
+	handler := New(svc, BuildInfo{}).Handler()
+	for _, path := range []string{"/api/v1/accounts/missing/usage/history", "/api/v1/accounts/missing/usage/forecast"} {
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("%s status %d: %s", path, rr.Code, rr.Body.String())
+		}
+		var envelope model.ErrorEnvelope
+		if err := json.Unmarshal(rr.Body.Bytes(), &envelope); err != nil || envelope.Error == nil || envelope.Error.Code != teach.AccountNotFound {
+			t.Fatalf("%s body %s", path, rr.Body.String())
+		}
+	}
+}
+
 func TestKeychainAdoptionReturnsStructuralFileOnlyRemedy(t *testing.T) {
 	svc, d := core.OpenService(t.TempDir(), []provider.Adapter{claude.New(nil)}, checker{})
 	if d != nil {

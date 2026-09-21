@@ -59,7 +59,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/accounts/{id}/refresh", s.refresh)
 	s.mux.HandleFunc("DELETE /api/v1/accounts/{id}", s.delete)
 	s.mux.HandleFunc("GET /api/v1/usage", s.aggregate)
+	s.mux.HandleFunc("GET /api/v1/usage/forecast", s.aggregateForecast)
 	s.mux.HandleFunc("GET /api/v1/accounts/{id}/usage", s.usage)
+	s.mux.HandleFunc("GET /api/v1/accounts/{id}/usage/history", s.history)
+	s.mux.HandleFunc("GET /api/v1/accounts/{id}/usage/forecast", s.forecast)
 	s.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		fail(w, teach.New(teach.HelpTopicNotFound, "The API path does not exist.", "accounts", nil, map[string]any{"path": r.URL.Path}, []model.RemedyCall{{Method: "GET", Path: "/api/v1/help"}}))
 	})
@@ -233,6 +236,15 @@ func (s *Server) aggregate(w http.ResponseWriter, r *http.Request) {
 	}
 	write(w, http.StatusOK, result)
 }
+
+func (s *Server) aggregateForecast(w http.ResponseWriter, r *http.Request) {
+	result, d := s.service.AggregateForecast()
+	if d != nil {
+		fail(w, d)
+		return
+	}
+	write(w, http.StatusOK, result)
+}
 func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 	mode, d := refreshMode(r)
 	if d != nil {
@@ -240,6 +252,24 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, d := s.service.Usage(r.Context(), r.PathValue("id"), mode)
+	if d != nil {
+		fail(w, d)
+		return
+	}
+	write(w, http.StatusOK, result)
+}
+
+func (s *Server) history(w http.ResponseWriter, r *http.Request) {
+	result, d := s.service.History(r.PathValue("id"))
+	if d != nil {
+		fail(w, d)
+		return
+	}
+	write(w, http.StatusOK, result)
+}
+
+func (s *Server) forecast(w http.ResponseWriter, r *http.Request) {
+	result, d := s.service.Forecast(r.PathValue("id"))
 	if d != nil {
 		fail(w, d)
 		return
