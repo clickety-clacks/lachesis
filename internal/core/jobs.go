@@ -490,7 +490,7 @@ func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row mode
 		j.failJob(job, accountAwareDetail(row.ID, detail))
 		return
 	}
-	if _, detail = adapter.Usage(verificationCtx, cred); detail != nil && !degradedClaudeVerification(job.model.Provider, detail) {
+	if _, detail = adapter.Usage(verificationCtx, cred); detail != nil && !degradedClaudeReOnboardVerification(job.model.Provider, detail) {
 		j.failJob(job, accountAwareDetail(row.ID, detail))
 		return
 	}
@@ -531,11 +531,19 @@ func (j *JobManager) runReOnboard(ctx context.Context, job *managedJob, row mode
 		j.failJob(job, teach.New(code, "The re-onboarded credential could not be committed.", "re-onboard", nil, map[string]any{"store_kind": row.Store.Kind}, nil, "preserve the original store"))
 		return
 	}
+	runtime.mu.Lock()
+	runtime.refreshRetryAt = time.Time{}
+	runtime.mu.Unlock()
 	j.service.cache.Clear(row.ID)
-	sample, detail := j.service.fetchDirect(verificationCtx, row)
-	if detail != nil && !degradedClaudeVerification(job.model.Provider, detail) {
-		j.failJob(job, detail)
-		return
+	var sample *model.UsageSample
+	if detail != nil && detail.Code == teach.UpstreamRateLimited {
+		j.service.cache.InstallError(row.ID, detail)
+	} else {
+		sample, detail = j.service.fetchDirect(verificationCtx, row)
+		if detail != nil && !degradedClaudeReOnboardVerification(job.model.Provider, detail) {
+			j.failJob(job, detail)
+			return
+		}
 	}
 	if sample != nil {
 		sample.AccountID = row.ID
@@ -568,6 +576,13 @@ func degradedClaudeVerification(providerName model.Provider, detail *model.Error
 		Description: "The provider response contains at least one valid recognized usage window.",
 		Met:         false,
 	})
+}
+
+func degradedClaudeReOnboardVerification(providerName model.Provider, detail *model.ErrorDetail) bool {
+	if providerName == model.ProviderClaude && detail != nil && detail.Code == teach.UpstreamRateLimited && detail.RetryAt != nil && detail.RetryAfterSeconds > 0 {
+		return true
+	}
+	return degradedClaudeVerification(providerName, detail)
 }
 
 func (j *JobManager) beginStart(job *managedJob) bool {

@@ -1,13 +1,17 @@
 package claude
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/clickety-clacks/lachesis/internal/model"
+	"github.com/clickety-clacks/lachesis/internal/provider"
 	"github.com/clickety-clacks/lachesis/internal/teach"
 )
 
@@ -36,6 +40,98 @@ func TestDefaultBindingRejectsRelativeClaudeConfigDir(t *testing.T) {
 	_, detail := New(nil).DefaultBinding()
 	if detail == nil || detail.Code != teach.InvalidRequest {
 		t.Fatalf("detail = %#v", detail)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestUsageRateLimitExposesRetryTimingWithoutUpstreamBody(t *testing.T) {
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != usageURL {
+			t.Fatalf("request URL = %q", req.URL)
+		}
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     http.Header{"Retry-After": []string{"800"}},
+			Body:       io.NopCloser(strings.NewReader(`{"message":"upstream-secret"}`)),
+			Request:    req,
+		}, nil
+	})}
+	adapter := New(client)
+	adapter.Now = func() time.Time { return now }
+	_, detail := adapter.Usage(context.Background(), provider.Credential{AccessToken: "credential-secret"})
+	if detail == nil || detail.Code != teach.UpstreamRateLimited || detail.RetryAfterSeconds != 800 || detail.RetryAt == nil || !detail.RetryAt.Equal(now.Add(800*time.Second)) {
+		t.Fatalf("detail = %#v", detail)
+	}
+	encoded, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "upstream-secret") || strings.Contains(string(encoded), "credential-secret") || !strings.Contains(string(encoded), `"retry_after_seconds":800`) || !strings.Contains(string(encoded), `"retry_at":"2026-09-23T12:13:20Z"`) {
+		t.Fatalf("public error JSON = %s", encoded)
+	}
+}
+
+func TestRefreshRateLimitPreservesRetryAfterWithoutUpstreamBody(t *testing.T) {
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != tokenURL {
+			t.Fatalf("request URL = %q", req.URL)
+		}
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     http.Header{"Retry-After": []string{"Wed, 23 Sep 2026 12:20:00 GMT"}},
+			Body:       io.NopCloser(strings.NewReader(`{"message":"upstream-secret"}`)),
+			Request:    req,
+		}, nil
+	})}
+	adapter := New(client)
+	adapter.Now = func() time.Time { return now }
+	_, detail := adapter.Refresh(context.Background(), provider.Credential{RefreshToken: "refresh-secret"})
+	if detail == nil || detail.Code != teach.UpstreamRateLimited || detail.Help != "/api/v1/help/refresh" || detail.RetryAfterSeconds != 1200 || detail.RetryAt == nil || !detail.RetryAt.Equal(now.Add(20*time.Minute)) {
+		t.Fatalf("detail = %#v", detail)
+	}
+	encoded, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "upstream-secret") || strings.Contains(string(encoded), "refresh-secret") {
+		t.Fatalf("public error JSON leaked a secret: %s", encoded)
+	}
+}
+
+func TestRetryAtFromHeader(t *testing.T) {
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		header string
+		want   time.Time
+	}{{
+		name:   "delta seconds",
+		header: "800",
+		want:   now.Add(800 * time.Second),
+	}, {
+		name:   "http date",
+		header: "Wed, 23 Sep 2026 12:20:00 GMT",
+		want:   now.Add(20 * time.Minute),
+	}, {
+		name:   "invalid fallback",
+		header: "not-a-delay",
+		want:   now.Add(time.Minute),
+	}, {
+		name:   "zero minimum",
+		header: "0",
+		want:   now.Add(time.Second),
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := retryAtFromHeader(tt.header, now); !got.Equal(tt.want) {
+				t.Fatalf("retryAt = %s, want %s", got, tt.want)
+			}
+		})
 	}
 }
 

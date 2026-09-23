@@ -6,12 +6,14 @@ import (
 	"time"
 
 	"github.com/clickety-clacks/lachesis/internal/model"
+	"github.com/clickety-clacks/lachesis/internal/teach"
 )
 
 type cacheEntry struct {
 	sample   *model.UsageSample
 	err      *model.ErrorDetail
 	inflight *cacheClaim
+	retryAt  time.Time
 }
 
 type cacheClaim struct{ done chan struct{} }
@@ -23,6 +25,7 @@ const (
 	cacheResume
 	cacheFinish
 	cacheInstall
+	cacheInstallError
 	cacheClear
 )
 
@@ -46,10 +49,14 @@ type Cache struct {
 
 func NewCache() *Cache { return &Cache{entries: map[string]*cacheEntry{}, now: time.Now} }
 
-func (c *Cache) Clear(id string) { c.mutate(id, cacheClear, nil, nil, nil) }
+func (c *Cache) Clear(id string) { c.mutate(id, cacheClear, nil, nil, nil, false) }
 
 func (c *Cache) Install(id string, sample model.UsageSample) {
-	c.mutate(id, cacheInstall, nil, &sample, nil)
+	c.mutate(id, cacheInstall, nil, &sample, nil, false)
+}
+
+func (c *Cache) InstallError(id string, detail *model.ErrorDetail) {
+	c.mutate(id, cacheInstallError, nil, nil, detail, false)
 }
 
 func (c *Cache) Peek(id string) (*model.UsageSample, *model.ErrorDetail) {
@@ -60,10 +67,18 @@ func (c *Cache) Peek(id string) (*model.UsageSample, *model.ErrorDetail) {
 }
 
 func (c *Cache) Fetch(ctx context.Context, id string, fetch func(context.Context) (*model.UsageSample, *model.ErrorDetail)) (*model.UsageSample, *model.ErrorDetail, bool) {
+	return c.fetch(ctx, id, fetch, false)
+}
+
+func (c *Cache) FetchForced(ctx context.Context, id string, fetch func(context.Context) (*model.UsageSample, *model.ErrorDetail)) (*model.UsageSample, *model.ErrorDetail, bool) {
+	return c.fetch(ctx, id, fetch, true)
+}
+
+func (c *Cache) fetch(ctx context.Context, id string, fetch func(context.Context) (*model.UsageSample, *model.ErrorDetail), force bool) (*model.UsageSample, *model.ErrorDetail, bool) {
 	mutation := cacheStart
 	for {
 		claim := &cacheClaim{done: make(chan struct{})}
-		result := c.mutate(id, mutation, claim, nil, nil)
+		result := c.mutate(id, mutation, claim, nil, nil, force)
 		if result.ready {
 			return result.snapshot.sample, result.snapshot.err, false
 		}
@@ -75,7 +90,7 @@ func (c *Cache) Fetch(ctx context.Context, id string, fetch func(context.Context
 			continue
 		}
 		sample, detail := fetch(ctx)
-		finish := c.mutate(id, cacheFinish, claim, sample, detail)
+		finish := c.mutate(id, cacheFinish, claim, sample, detail, false)
 		if finish.applied || finish.snapshot.sample != nil || finish.snapshot.err != nil {
 			return finish.snapshot.sample, finish.snapshot.err, finish.applied
 		}
@@ -99,7 +114,7 @@ func waitForCacheClaim(ctx context.Context, claim *cacheClaim) bool {
 }
 
 // mutate is the only transition point for an account's sample, error, and fetch claim.
-func (c *Cache) mutate(id string, mutation cacheMutation, claim *cacheClaim, sample *model.UsageSample, detail *model.ErrorDetail) cacheMutationResult {
+func (c *Cache) mutate(id string, mutation cacheMutation, claim *cacheClaim, sample *model.UsageSample, detail *model.ErrorDetail, force bool) cacheMutationResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -126,6 +141,9 @@ func (c *Cache) mutate(id string, mutation cacheMutation, claim *cacheClaim, sam
 		if e.inflight != nil {
 			return cacheMutationResult{inflight: e.inflight}
 		}
+		if !force && e.retryAt.After(c.now()) {
+			return cacheMutationResult{snapshot: c.snapshot(e), ready: true}
+		}
 		e.inflight = claim
 		return cacheMutationResult{inflight: claim, applied: true}
 	case cacheResume:
@@ -144,8 +162,13 @@ func (c *Cache) mutate(id string, mutation cacheMutation, claim *cacheClaim, sam
 		if sample != nil {
 			e.sample = copyUsageSample(sample)
 			e.err = nil
+			e.retryAt = time.Time{}
 		} else {
 			e.err = detail
+			e.retryAt = time.Time{}
+			if detail != nil && detail.Code == teach.UpstreamRateLimited && detail.RetryAt != nil {
+				e.retryAt = *detail.RetryAt
+			}
 		}
 		e.inflight = nil
 		close(claim.done)
@@ -154,6 +177,20 @@ func (c *Cache) mutate(id string, mutation cacheMutation, claim *cacheClaim, sam
 		retired := e.inflight
 		e.sample = copyUsageSample(sample)
 		e.err = nil
+		e.retryAt = time.Time{}
+		e.inflight = nil
+		if retired != nil {
+			close(retired.done)
+		}
+		return cacheMutationResult{applied: true}
+	case cacheInstallError:
+		retired := e.inflight
+		e.sample = nil
+		e.err = detail
+		e.retryAt = time.Time{}
+		if detail != nil && detail.Code == teach.UpstreamRateLimited && detail.RetryAt != nil {
+			e.retryAt = *detail.RetryAt
+		}
 		e.inflight = nil
 		if retired != nil {
 			close(retired.done)

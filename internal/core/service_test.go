@@ -301,6 +301,32 @@ func TestRefreshBusyCheckUsesRegisteredProviderHome(t *testing.T) {
 	}
 }
 
+func TestSchedulerDefersRefreshDuringTokenRateLimitCooldown(t *testing.T) {
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	service, detail := OpenService(t.TempDir(), []provider.Adapter{&fakeAdapter{provider: model.ProviderClaude, credential: ".credentials.json"}}, idleChecker{})
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	defer service.Close()
+	service.SetClockForTests(func() time.Time { return now })
+	account := adoptGenerationAccount(t, service)
+	row, ok := service.registry.Find(account.ID)
+	if !ok {
+		t.Fatal("registered account not found")
+	}
+	service.mu.RLock()
+	runtime := service.state[account.ID]
+	service.mu.RUnlock()
+	runtime.mu.Lock()
+	runtime.refreshRetryAt = now.Add(800 * time.Second)
+	runtime.mu.Unlock()
+
+	service.refreshIfDue(context.Background(), row)
+	if got := service.accountView(row).Status; got != model.StatusReady {
+		t.Fatalf("account status after deferred refresh = %q, want ready", got)
+	}
+}
+
 func TestAggregatePassesDiagnosticsAndIsolatesFatalAccount(t *testing.T) {
 	degradedAdapter := &fakeAdapter{
 		provider: model.ProviderCodex,

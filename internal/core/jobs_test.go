@@ -409,6 +409,56 @@ func TestClaudeReOnboardUsageContractChangeCommitsDegradedSuccess(t *testing.T) 
 	}
 }
 
+func TestClaudeReOnboardRateLimitCommitsAndCachesRetryDeadline(t *testing.T) {
+	adapter := &jobAdapter{name: model.ProviderClaude, start: func(home string) (provider.LoginProcess, *model.ErrorDetail) {
+		if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte("candidate"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		process := newControlledLogin()
+		process.finish(nil)
+		return process, nil
+	}}
+	service := openJobService(t, adapter)
+	defer service.Close()
+	originalHome := t.TempDir()
+	originalPath := filepath.Join(originalHome, ".credentials.json")
+	if err := os.WriteFile(originalPath, []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	account, detail := service.Adopt(context.Background(), model.ProviderClaude, "work", model.StoreBinding{Kind: "file", Home: originalHome, CredentialPath: originalPath})
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	retryAt := time.Now().UTC().Add(800 * time.Second)
+	rateLimited := teach.New(teach.UpstreamRateLimited, "Claude usage is temporarily rate limited.", "usage", nil, map[string]any{"provider": model.ProviderClaude}, nil)
+	rateLimited.RetryAt = &retryAt
+	rateLimited.RetryAfterSeconds = 800
+	var usageCalls atomic.Int32
+	adapter.usage = func(context.Context, provider.Credential) (*model.UsageSample, *model.ErrorDetail) {
+		usageCalls.Add(1)
+		return nil, rateLimited
+	}
+
+	job, detail := service.Jobs().StartReOnboard(account.ID)
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	job = waitForJobState(t, service, job.ID, "succeeded")
+	if job.Error != nil || job.ResultAccount == nil || job.ResultAccount.Status != model.StatusDegraded || job.ResultAccount.MutationState != model.MutationIdle || job.ResultAccount.LastError == nil || job.ResultAccount.LastError.Code != teach.UpstreamRateLimited || job.ResultAccount.LastError.RetryAfterSeconds != 800 || job.ResultAccount.LastError.RetryAt == nil || !job.ResultAccount.LastError.RetryAt.Equal(retryAt) {
+		t.Fatalf("job = %#v", job)
+	}
+	if raw, err := os.ReadFile(originalPath); err != nil || string(raw) != "candidate" {
+		t.Fatalf("committed credential = %q, %v", raw, err)
+	}
+	if usageCalls.Load() != 1 {
+		t.Fatalf("usage calls = %d, want one candidate check", usageCalls.Load())
+	}
+	_, cachedDetail := service.cache.Peek(account.ID)
+	if cachedDetail == nil || cachedDetail.Code != teach.UpstreamRateLimited || cachedDetail.RetryAt == nil || !cachedDetail.RetryAt.Equal(retryAt) {
+		t.Fatalf("cached rate limit = %#v", cachedDetail)
+	}
+}
+
 func TestListenerExitFailsAndReleasesProvider(t *testing.T) {
 	adapter := &jobAdapter{name: model.ProviderClaude, start: func(string) (provider.LoginProcess, *model.ErrorDetail) {
 		process := newControlledLogin()

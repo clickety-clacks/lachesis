@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -81,6 +82,9 @@ func (a *Adapter) Usage(ctx context.Context, c provider.Credential) (*model.Usag
 		return nil, upstream(err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, a.rateLimited(resp.Header.Get("Retry-After"), "Claude usage is temporarily rate limited. Retry after the supplied delay.", "usage")
+	}
 	var raw json.RawMessage
 	if json.NewDecoder(resp.Body).Decode(&raw) != nil {
 		return nil, detail(teach.UpstreamContractChanged, "Claude returned a non-JSON usage response.")
@@ -97,6 +101,51 @@ func (a *Adapter) Usage(ctx context.Context, c provider.Credential) (*model.Usag
 	return normalize(raw, a.Now())
 }
 
+func (a *Adapter) rateLimited(retryAfter, message, helpTopic string) *model.ErrorDetail {
+	now := time.Now().UTC()
+	if a.Now != nil {
+		now = a.Now().UTC()
+	}
+	retryAt := retryAtFromHeader(retryAfter, now)
+	delay := retryAt.Sub(now)
+	seconds := int64(delay / time.Second)
+	if delay%time.Second != 0 {
+		seconds++
+	}
+	if seconds < 1 {
+		seconds = 1
+	}
+	detail := teach.New(teach.UpstreamRateLimited, message, helpTopic, nil,
+		map[string]any{"provider": model.ProviderClaude}, nil, "wait until retry_at, then retry the exact call")
+	detail.RetryAt = &retryAt
+	detail.RetryAfterSeconds = seconds
+	return detail
+}
+
+func retryAtFromHeader(value string, now time.Time) time.Time {
+	const fallback = time.Minute
+	value = strings.TrimSpace(value)
+	onlyDigits := value != ""
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			onlyDigits = false
+			break
+		}
+	}
+	if onlyDigits {
+		if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds <= int64((time.Duration(1<<63-1))/time.Second) {
+			if seconds == 0 {
+				seconds = 1
+			}
+			return now.Add(time.Duration(seconds) * time.Second)
+		}
+	}
+	if retryAt, err := http.ParseTime(value); err == nil && retryAt.After(now) {
+		return retryAt.UTC()
+	}
+	return now.Add(fallback)
+}
+
 func (a *Adapter) Refresh(ctx context.Context, c provider.Credential) ([]byte, *model.ErrorDetail) {
 	body, _ := json.Marshal(map[string]any{"grant_type": "refresh_token", "refresh_token": c.RefreshToken, "client_id": clientID})
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(string(body)))
@@ -106,6 +155,9 @@ func (a *Adapter) Refresh(ctx context.Context, c provider.Credential) ([]byte, *
 		return nil, upstream(err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, a.rateLimited(resp.Header.Get("Retry-After"), "Claude token refresh is temporarily rate limited. Retry after the supplied delay.", "refresh")
+	}
 	var result struct {
 		Access  string `json:"access_token"`
 		Refresh string `json:"refresh_token"`

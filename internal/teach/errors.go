@@ -35,6 +35,7 @@ const (
 	KeychainAtomicCommitUnavailable = "KEYCHAIN_ATOMIC_COMMIT_UNAVAILABLE"
 	KeychainSourceUnsupported       = "KEYCHAIN_SOURCE_UNSUPPORTED"
 	UpstreamContractChanged         = "UPSTREAM_CONTRACT_CHANGED"
+	UpstreamRateLimited             = "UPSTREAM_RATE_LIMITED"
 	CLIMissing                      = "CLI_MISSING"
 	UpstreamUnavailable             = "UPSTREAM_UNAVAILABLE"
 	UpstreamTimeout                 = "UPSTREAM_TIMEOUT"
@@ -56,7 +57,7 @@ var status = map[string]int{
 	CredentialCommitFailed:          http.StatusInternalServerError,
 	KeychainAtomicCommitUnavailable: http.StatusInternalServerError,
 	KeychainSourceUnsupported:       http.StatusBadRequest,
-	UpstreamContractChanged:         http.StatusBadGateway, CLIMissing: http.StatusServiceUnavailable,
+	UpstreamContractChanged:         http.StatusBadGateway, UpstreamRateLimited: http.StatusTooManyRequests, CLIMissing: http.StatusServiceUnavailable,
 	UpstreamUnavailable: http.StatusServiceUnavailable, UpstreamTimeout: http.StatusServiceUnavailable,
 }
 
@@ -88,7 +89,7 @@ func remedySummary(code string) string {
 	switch code {
 	case CredentialMissing, CredentialRejected, RefreshRejected, TokenScopeInsufficient:
 		return "Re-onboard the account."
-	case UpstreamUnavailable, UpstreamTimeout:
+	case UpstreamUnavailable, UpstreamTimeout, UpstreamRateLimited:
 		return "Retry the exact call."
 	case CLIMissing:
 		return "Install the provider CLI, then retry."

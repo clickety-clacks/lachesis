@@ -77,12 +77,14 @@ type Remedy struct {
 }
 
 type ErrorDetail struct {
-	Code          string         `json:"code"`
-	Message       string         `json:"message"`
-	Prerequisites []Prerequisite `json:"prerequisites"`
-	State         map[string]any `json:"state"`
-	Remedy        Remedy         `json:"remedy"`
-	Help          string         `json:"help"`
+	Code              string         `json:"code"`
+	Message           string         `json:"message"`
+	Prerequisites     []Prerequisite `json:"prerequisites"`
+	State             map[string]any `json:"state"`
+	Remedy            Remedy         `json:"remedy"`
+	Help              string         `json:"help"`
+	RetryAt           *time.Time     `json:"retry_at,omitempty"`
+	RetryAfterSeconds int64          `json:"retry_after_seconds,omitempty"`
 }
 
 func (e *ErrorDetail) Error() string { return e.Code + ": " + e.Message }

@@ -424,6 +424,49 @@ func TestUsageKeepsAgeStaleSeparateFromFailedReadFallback(t *testing.T) {
 	assertGeneration(t, failed.Sample, newer)
 }
 
+func TestUsageRateLimitBackoffStopsBackgroundFetchesButWaitCanRetry(t *testing.T) {
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	adapter := &generationAdapter{fakeAdapter: &fakeAdapter{provider: model.ProviderClaude, credential: ".credentials.json"}}
+	service, detail := OpenService(t.TempDir(), []provider.Adapter{adapter}, idleChecker{})
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	defer service.Close()
+	service.SetClockForTests(func() time.Time { return now })
+	account := adoptGenerationAccount(t, service)
+	service.cache.Clear(account.ID)
+
+	retryAt := now.Add(800 * time.Second)
+	rateLimited := teach.New(teach.UpstreamRateLimited, "Claude usage is temporarily rate limited.", "usage", nil, nil, nil)
+	rateLimited.RetryAt = &retryAt
+	rateLimited.RetryAfterSeconds = 800
+	var calls atomic.Int32
+	adapter.usage = func(context.Context) (*model.UsageSample, *model.ErrorDetail) {
+		if calls.Add(1) == 1 {
+			return nil, rateLimited
+		}
+		return generationSample(account.ID, 12, retryAt.Add(time.Hour), now, "retry"), nil
+	}
+
+	if _, got := service.Usage(context.Background(), account.ID, "background"); got != rateLimited {
+		t.Fatalf("first background detail = %#v, want rate limit", got)
+	}
+	if _, got := service.Usage(context.Background(), account.ID, "background"); got != rateLimited {
+		t.Fatalf("second background detail = %#v, want cached rate limit", got)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("background fetch count = %d, want 1", calls.Load())
+	}
+
+	result, got := service.Usage(context.Background(), account.ID, "wait")
+	if got != nil || result.Status != "live" || result.Sample == nil || result.Error != nil {
+		t.Fatalf("wait result = %#v, detail = %#v", result, got)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("fetch count after explicit wait = %d, want 2", calls.Load())
+	}
+}
+
 func adoptGenerationAccount(t *testing.T, service *Service) model.Account {
 	t.Helper()
 	home := t.TempDir()

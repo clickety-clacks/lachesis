@@ -25,12 +25,13 @@ import (
 type StoreFactory func(model.StoreBinding) (store.Adapter, error)
 
 type runtimeAccount struct {
-	mu       sync.Mutex
-	op       sync.Mutex
-	status   model.AccountStatus
-	mutation model.MutationState
-	checked  *time.Time
-	lastErr  *model.ErrorDetail
+	mu             sync.Mutex
+	op             sync.Mutex
+	status         model.AccountStatus
+	mutation       model.MutationState
+	checked        *time.Time
+	lastErr        *model.ErrorDetail
+	refreshRetryAt time.Time
 }
 
 type Service struct {
@@ -342,6 +343,7 @@ func (s *Service) Refresh(ctx context.Context, id string) (model.Account, *model
 	defer r.op.Unlock()
 	r.mu.Lock()
 	r.mutation = model.MutationRefreshing
+	r.refreshRetryAt = time.Time{}
 	r.mu.Unlock()
 	defer func() { r.mu.Lock(); r.mutation = model.MutationIdle; r.mu.Unlock() }()
 	busy, err := s.process.Busy(ctx, processcheck.Target{Provider: row.Provider, Home: row.Store.Home})
@@ -376,9 +378,17 @@ func (s *Service) Refresh(ctx context.Context, id string) (model.Account, *model
 	candidate, d := adapter.Refresh(ctx, original)
 	if d != nil {
 		d = accountAwareDetail(id, d)
+		if d.Code == teach.UpstreamRateLimited && d.RetryAt != nil {
+			r.mu.Lock()
+			r.refreshRetryAt = *d.RetryAt
+			r.mu.Unlock()
+		}
 		s.applyError(r, d, nil)
 		return model.Account{}, d
 	}
+	r.mu.Lock()
+	r.refreshRetryAt = time.Time{}
+	r.mu.Unlock()
 	parsed, d := adapter.ParseCredential(candidate)
 	if d != nil {
 		d = accountAwareDetail(id, d)
@@ -528,7 +538,15 @@ func (s *Service) usageResult(ctx context.Context, row model.RegistryAccount, mo
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	got, detail, started := s.cache.Fetch(waitCtx, row.ID, func(ctx context.Context) (*model.UsageSample, *model.ErrorDetail) { return s.fetchAccount(ctx, row) })
+	fetch := func(ctx context.Context) (*model.UsageSample, *model.ErrorDetail) { return s.fetchAccount(ctx, row) }
+	var got *model.UsageSample
+	var detail *model.ErrorDetail
+	var started bool
+	if mode == "wait" {
+		got, detail, started = s.cache.FetchForced(waitCtx, row.ID, fetch)
+	} else {
+		got, detail, started = s.cache.Fetch(waitCtx, row.ID, fetch)
+	}
 	if got != nil {
 		if detail != nil {
 			return model.UsageResult{AccountID: row.ID, Status: "stale", Sample: got, Error: detail}
@@ -689,6 +707,12 @@ func (s *Service) refreshIfDue(ctx context.Context, row model.RegistryAccount) {
 	runtime := s.state[row.ID]
 	s.mu.RUnlock()
 	if runtime == nil {
+		return
+	}
+	runtime.mu.Lock()
+	retryAt := runtime.refreshRetryAt
+	runtime.mu.Unlock()
+	if retryAt.After(s.now()) {
 		return
 	}
 	runtime.op.Lock()
