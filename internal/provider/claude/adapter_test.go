@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -147,17 +148,21 @@ func TestNormalizeOmitsInvalidFixedBucketAndKeepsSibling(t *testing.T) {
 	assertClaudeDiagnostic(t, sample.Diagnostics[0])
 }
 
-func TestNormalizeAcceptsFractionalAndPercentScaleBuckets(t *testing.T) {
-	raw := json.RawMessage(`{"five_hour":{"utilization":0.25},"seven_day":{"utilization":25},"seven_day_sonnet":{"utilization":1}}`)
-	sample, detail := normalize(raw, time.Unix(1, 0))
-	if detail != nil {
-		t.Fatal(detail)
-	}
-	if len(sample.Windows) != 3 || sample.Windows[0].UsedPercent != 25 || sample.Windows[1].UsedPercent != 25 || sample.Windows[2].UsedPercent != 100 || len(sample.Diagnostics) != 0 || string(sample.Raw) != string(raw) {
-		t.Fatalf("sample = %#v", sample)
-	}
-	if *sample.Windows[0].WindowSeconds != 5*60*60 || *sample.Windows[1].WindowSeconds != 7*24*60*60 || *sample.Windows[2].WindowSeconds != 7*24*60*60 {
-		t.Fatalf("window durations = %#v", sample.Windows)
+func TestNormalizePreservesClaudePercentagesAcrossFixedAndMappedBuckets(t *testing.T) {
+	for _, utilization := range []float64{0, 0.5, 1, 3, 100} {
+		t.Run(fmt.Sprintf("%g_percent", utilization), func(t *testing.T) {
+			raw := json.RawMessage(fmt.Sprintf(`{"five_hour":{"utilization":%g},"limits":{"synthetic":{"utilization":%g}}}`, utilization, utilization))
+			sample, detail := normalize(raw, time.Unix(1, 0))
+			if detail != nil {
+				t.Fatal(detail)
+			}
+			if len(sample.Windows) != 2 || sample.Windows[0].ID != "five_hour" || sample.Windows[0].UsedPercent != utilization || sample.Windows[1].ID != "limit:synthetic" || sample.Windows[1].UsedPercent != utilization || len(sample.Diagnostics) != 0 || string(sample.Raw) != string(raw) {
+				t.Fatalf("sample = %#v", sample)
+			}
+			if sample.Windows[0].WindowSeconds == nil || *sample.Windows[0].WindowSeconds != 5*60*60 || sample.Windows[1].WindowSeconds != nil {
+				t.Fatalf("window durations = %#v", sample.Windows)
+			}
+		})
 	}
 }
 
@@ -260,7 +265,7 @@ func TestNormalizePreservesValidRawResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sample.Windows) != 2 || sample.Windows[0].UsedPercent != 25 || len(sample.Diagnostics) != 0 || string(sample.Raw) != string(raw) || !strings.Contains(string(encoded), `"diagnostics":[]`) {
+	if len(sample.Windows) != 2 || sample.Windows[0].UsedPercent != 0.25 || len(sample.Diagnostics) != 0 || string(sample.Raw) != string(raw) || !strings.Contains(string(encoded), `"diagnostics":[]`) {
 		t.Fatalf("sample = %#v", sample)
 	}
 }

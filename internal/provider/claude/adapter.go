@@ -285,9 +285,6 @@ func claudeWindow(id, name string, b bucket) (model.Window, bool) {
 	if p < 0 || p > 100 {
 		return model.Window{}, false
 	}
-	if p <= 1 {
-		p *= 100
-	}
 	return model.Window{ID: id, Name: name, UsedPercent: p, ResetsAt: b.ResetsAt}, true
 }
 func decodeBucket(id, name string, raw json.RawMessage) (model.Window, bool) {
