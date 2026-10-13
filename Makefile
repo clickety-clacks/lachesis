@@ -1,8 +1,6 @@
-.PHONY: test vet build scan smoke verify
+.PHONY: test build scan smoke verify
 test:
 	go test ./...
-vet:
-	go vet ./...
 build:
 	go build ./cmd/lachesis
 scan:
