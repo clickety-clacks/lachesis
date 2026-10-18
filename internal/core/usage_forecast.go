@@ -26,10 +26,11 @@ type forecastPoint struct {
 }
 
 type forecastSegment struct {
-	points     []forecastPoint
-	hadDecline bool
-	resetKnown bool
-	generation string
+	points                   []forecastPoint
+	hadDecline               bool
+	sameGenerationDecline    bool
+	resetKnown               bool
+	generation               string
 }
 
 type forecastRate struct {
@@ -213,7 +214,15 @@ func forecastWindow(samples []model.UsageHistorySample, latestSample model.Usage
 			out.Diagnostics = append(out.Diagnostics, model.Diagnostic{Code: "USAGE_UNKNOWN_RESET", Message: "The decrease has no reset marker, so only post-decrease observations support a qualified rate."})
 		}
 	}
-	rateSegments := segments
+	rateSegments := make([]forecastSegment, 0, len(segments))
+	for _, candidate := range segments {
+		// A decline without a reset-marker change makes the segment that ended
+		// at that decline suspect. Keep its neighbors, which may represent
+		// ordinary usage on either side of a real reset generation.
+		if !candidate.sameGenerationDecline {
+			rateSegments = append(rateSegments, candidate)
+		}
+	}
 	if unknownDecline {
 		rateSegments = []forecastSegment{segment}
 	}
@@ -316,6 +325,7 @@ func splitForecastSegments(points []forecastPoint) []forecastSegment {
 		declined := point.used+0.000001 < prior.used
 		if generationChanged || declined {
 			current.hadDecline = current.hadDecline || declined
+			current.sameGenerationDecline = current.sameGenerationDecline || (declined && !generationChanged)
 			segments = append(segments, forecastSegment{points: []forecastPoint{point}, resetKnown: point.resetsAt != nil})
 			continue
 		}

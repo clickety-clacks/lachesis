@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -260,6 +261,97 @@ func TestForecastCappedDemandDoesNotDiluteRate(t *testing.T) {
 	}
 }
 
+func TestForecastIgnoresDeclinedSegmentAndPreservesLaterExhaustion(t *testing.T) {
+	service, account, now := forecastServiceForProvider(t, model.ProviderClaude)
+	defer service.Close()
+
+	seconds := int64(7 * 24 * 60 * 60)
+	reset := now.Add(7 * 24 * time.Hour)
+	// Synthetic history: a high same-generation reading falls back, then later
+	// uncapped use reaches and remains at exhaustion.
+	for i, used := range []float64{8, 88, 12, 32, 52, 72, 92, 100, 100, 100} {
+		at := now.Add(-time.Duration(9-i) * time.Hour)
+		err := service.history.Append(account.ID, model.UsageSample{
+			AccountID:  account.ID,
+			Provider:   model.ProviderClaude,
+			ObservedAt: at,
+			Windows: []model.Window{{
+				ID: "weekly", Name: "Weekly", UsedPercent: used,
+				ResetsAt: &reset, WindowSeconds: &seconds,
+			}},
+		})
+		if err != nil && err != errUsageHistoryUnchanged {
+			t.Fatal(err)
+		}
+	}
+
+	forecast, detail := service.Forecast(account.ID)
+	if detail != nil || len(forecast.Windows) != 1 {
+		t.Fatalf("forecast = %#v, detail = %#v", forecast, detail)
+	}
+	window := forecast.Windows[0]
+	if window.Status != "exhausted" || forecast.ExhaustionAt == nil {
+		t.Fatalf("later exhaustion was lost: %#v", window)
+	}
+	if window.Rate48hPercentPerHour == nil || math.Abs(*window.Rate48hPercentPerHour-17.6) > 0.000001 {
+		t.Fatalf("48-hour rate includes the declined segment: %#v", window)
+	}
+	if window.Coverage48hHours != 5 || !hasDiagnostic(window.Diagnostics, "USAGE_CAPPED_DEMAND_CENSORED") {
+		t.Fatalf("later usage coverage or capped qualification was lost: %#v", window)
+	}
+}
+
+func TestAggregateForecastKeepsUnknownPlanClaudeEstimatePerAccount(t *testing.T) {
+	service, account, now := forecastServiceForProvider(t, model.ProviderClaude)
+	defer service.Close()
+
+	fiveHourSeconds := int64(5 * 60 * 60)
+	weeklySeconds := int64(7 * 24 * 60 * 60)
+	fiveHourReset := now.Add(8 * time.Hour)
+	weeklyReset := now.Add(6 * 24 * time.Hour)
+	for i, used := range []float64{10, 20, 30} {
+		windows := []model.Window{{
+			ID: "five_hour", Name: "Five hour", UsedPercent: used,
+			ResetsAt: &fiveHourReset, WindowSeconds: &fiveHourSeconds,
+		}}
+		if i == 2 {
+			windows = append(windows, model.Window{
+				ID: "weekly", Name: "Weekly", UsedPercent: 40,
+				ResetsAt: &weeklyReset, WindowSeconds: &weeklySeconds,
+			})
+		}
+		err := service.history.Append(account.ID, model.UsageSample{
+			AccountID: account.ID, Provider: model.ProviderClaude,
+			ObservedAt: now.Add(-time.Duration(2-i) * time.Hour), Windows: windows,
+		})
+		if err != nil && err != errUsageHistoryUnchanged {
+			t.Fatal(err)
+		}
+	}
+
+	aggregate, detail := service.AggregateForecast()
+	if detail != nil || len(aggregate.Accounts) != 1 {
+		t.Fatalf("aggregate = %#v, detail = %#v", aggregate, detail)
+	}
+	accountForecast := aggregate.Accounts[0]
+	if accountForecast.Plan != nil || accountForecast.Status != "estimated_qualified" || accountForecast.ExhaustionAt == nil || accountForecast.Qualification == "" {
+		t.Fatalf("unknown-plan account estimate was lost or unqualified: %#v", accountForecast)
+	}
+	if aggregate.Status != "unavailable" || !hasDiagnostic(aggregate.Diagnostics, "NO_COMPARABLE_POOL") {
+		t.Fatalf("unknown plan was represented as comparable capacity: %#v", aggregate)
+	}
+	for _, pool := range aggregate.Pools {
+		if pool.WindowID != "five_hour" {
+			continue
+		}
+		if pool.PlanKnown || pool.Comparable || pool.Compatibility != "singleton_unknown_plan" || len(pool.Members) != 1 || pool.Members[0].RatePercentPerHour == nil || pool.Members[0].ExhaustionAt == nil {
+			t.Fatalf("unknown-plan pool lost its per-account estimate or comparability boundary: %#v", pool)
+		}
+		return
+	}
+	t.Fatalf("five-hour unknown-plan pool missing: %#v", aggregate.Pools)
+}
+
 func TestForecastReportsResetBeforeExhaustionAndStalePastReset(t *testing.T) {
 	service, account, now := forecastService(t)
 	defer service.Close()
@@ -461,20 +553,28 @@ func TestAggregateForecastIncludesZeroBurnAndCappedQualification(t *testing.T) {
 }
 
 func forecastService(t *testing.T) (*Service, model.Account, time.Time) {
+	return forecastServiceForProvider(t, model.ProviderCodex)
+}
+
+func forecastServiceForProvider(t *testing.T, providerName model.Provider) (*Service, model.Account, time.Time) {
 	t.Helper()
 	now := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
-	adapter := &fakeAdapter{provider: model.ProviderCodex, usageSample: &model.UsageSample{Provider: model.ProviderCodex, ObservedAt: now, Windows: []model.Window{{ID: "primary", UsedPercent: 10}}}}
+	credentialName := "auth.json"
+	if providerName == model.ProviderClaude {
+		credentialName = ".credentials.json"
+	}
+	adapter := &fakeAdapter{provider: providerName, credential: credentialName, usageSample: &model.UsageSample{Provider: providerName, ObservedAt: now, Windows: []model.Window{{ID: "primary", UsedPercent: 10}}}}
 	service, detail := OpenService(t.TempDir(), []provider.Adapter{adapter}, idleChecker{})
 	if detail != nil {
 		t.Fatal(detail)
 	}
 	service.SetClockForTests(func() time.Time { return now })
 	home := t.TempDir()
-	credential := filepath.Join(home, "auth.json")
+	credential := filepath.Join(home, credentialName)
 	if err := os.WriteFile(credential, []byte("credential"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	account, detail := service.Adopt(context.Background(), model.ProviderCodex, "forecast", model.StoreBinding{Kind: "file", Home: home, CredentialPath: credential})
+	account, detail := service.Adopt(context.Background(), providerName, "forecast", model.StoreBinding{Kind: "file", Home: home, CredentialPath: credential})
 	if detail != nil {
 		t.Fatal(detail)
 	}
