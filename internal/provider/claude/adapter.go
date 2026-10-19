@@ -19,6 +19,7 @@ import (
 )
 
 const usageURL = "https://api.anthropic.com/api/oauth/usage"
+const profileURL = "https://api.anthropic.com/api/oauth/profile"
 const tokenURL = "https://console.anthropic.com/v1/oauth/token"
 const clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
@@ -98,7 +99,41 @@ func (a *Adapter) Usage(ctx context.Context, c provider.Credential) (*model.Usag
 	if !provider.RawUsageSafe(raw) {
 		return nil, detail(teach.UpstreamContractChanged, "Claude usage contained a credential-bearing field.")
 	}
-	return normalize(raw, a.Now())
+	sample, detail := normalize(raw, a.Now())
+	if detail != nil {
+		return nil, detail
+	}
+	sample.ProviderAccountUUID = a.providerAccountUUID(ctx, c.AccessToken, contains(c.Scopes, "user:profile"))
+	return sample, nil
+}
+
+// providerAccountUUID is best-effort so profile failures do not discard valid usage.
+func (a *Adapter) providerAccountUUID(ctx context.Context, accessToken string, hasProfileScope bool) *string {
+	if accessToken == "" || !hasProfileScope {
+		return nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, profileURL, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	resp, err := a.Client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil
+	}
+	var profile struct {
+		Account struct {
+			UUID string `json:"uuid"`
+		} `json:"account"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&profile) != nil || profile.Account.UUID == "" {
+		return nil
+	}
+	return &profile.Account.UUID
 }
 
 func (a *Adapter) rateLimited(retryAfter, message, helpTopic string) *model.ErrorDetail {

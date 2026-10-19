@@ -95,16 +95,17 @@ type ErrorEnvelope struct {
 }
 
 type Account struct {
-	ID            string            `json:"id"`
-	Label         string            `json:"label"`
-	Provider      Provider          `json:"provider"`
-	StoreKind     string            `json:"store_kind"`
-	Status        AccountStatus     `json:"status"`
-	Working       bool              `json:"working"`
-	MutationState MutationState     `json:"mutation_state"`
-	LastCheckedAt *time.Time        `json:"last_checked_at"`
-	LastError     *ErrorDetail      `json:"last_error"`
-	Links         map[string]string `json:"links"`
+	ID                  string            `json:"id"`
+	Label               string            `json:"label"`
+	Provider            Provider          `json:"provider"`
+	ProviderAccountUUID *string           `json:"provider_account_uuid"`
+	StoreKind           string            `json:"store_kind"`
+	Status              AccountStatus     `json:"status"`
+	Working             bool              `json:"working"`
+	MutationState       MutationState     `json:"mutation_state"`
+	LastCheckedAt       *time.Time        `json:"last_checked_at"`
+	LastError           *ErrorDetail      `json:"last_error"`
+	Links               map[string]string `json:"links"`
 }
 
 type Window struct {
@@ -121,15 +122,17 @@ type Diagnostic struct {
 }
 
 type UsageSample struct {
-	AccountID   string          `json:"account_id"`
-	Provider    Provider        `json:"provider"`
-	Label       string          `json:"label"`
-	Plan        *string         `json:"plan"`
-	ObservedAt  time.Time       `json:"observed_at"`
-	AgeSeconds  int64           `json:"age_seconds"`
-	Windows     []Window        `json:"windows"`
-	Diagnostics []Diagnostic    `json:"diagnostics"`
-	Raw         json.RawMessage `json:"raw"`
+	AccountID string   `json:"account_id"`
+	Provider  Provider `json:"provider"`
+	// ProviderAccountUUID is carried in memory to the registered-account response only.
+	ProviderAccountUUID *string         `json:"-"`
+	Label               string          `json:"label"`
+	Plan                *string         `json:"plan"`
+	ObservedAt          time.Time       `json:"observed_at"`
+	AgeSeconds          int64           `json:"age_seconds"`
+	Windows             []Window        `json:"windows"`
+	Diagnostics         []Diagnostic    `json:"diagnostics"`
+	Raw                 json.RawMessage `json:"raw"`
 }
 
 // UsageHistorySample is the persisted, provider-neutral subset of a usage

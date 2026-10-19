@@ -25,13 +25,14 @@ import (
 type StoreFactory func(model.StoreBinding) (store.Adapter, error)
 
 type runtimeAccount struct {
-	mu             sync.Mutex
-	op             sync.Mutex
-	status         model.AccountStatus
-	mutation       model.MutationState
-	checked        *time.Time
-	lastErr        *model.ErrorDetail
-	refreshRetryAt time.Time
+	mu                  sync.Mutex
+	op                  sync.Mutex
+	status              model.AccountStatus
+	mutation            model.MutationState
+	checked             *time.Time
+	lastErr             *model.ErrorDetail
+	providerAccountUUID *string
+	refreshRetryAt      time.Time
 }
 
 type Service struct {
@@ -100,6 +101,19 @@ func (s *Service) SetClockForTests(now func() time.Time) {
 }
 
 func (s *Service) recordUsage(id string, sample model.UsageSample) {
+	s.mu.RLock()
+	r := s.state[id]
+	s.mu.RUnlock()
+	if r != nil {
+		r.mu.Lock()
+		if sample.ProviderAccountUUID == nil {
+			r.providerAccountUUID = nil
+		} else {
+			providerAccountUUID := *sample.ProviderAccountUUID
+			r.providerAccountUUID = &providerAccountUUID
+		}
+		r.mu.Unlock()
+	}
 	if s.history == nil {
 		return
 	}
@@ -262,7 +276,7 @@ func (s *Service) accountView(a model.RegistryAccount) model.Account {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	base := "/api/v1/accounts/" + a.ID
-	return model.Account{ID: a.ID, Label: a.Label, Provider: a.Provider, StoreKind: a.Store.Kind, Status: r.status, Working: r.status == model.StatusReady, MutationState: r.mutation, LastCheckedAt: r.checked, LastError: r.lastErr, Links: map[string]string{"verify": base + "/verify", "re_onboard": base + "/re-onboard", "usage": base + "/usage"}}
+	return model.Account{ID: a.ID, Label: a.Label, Provider: a.Provider, ProviderAccountUUID: r.providerAccountUUID, StoreKind: a.Store.Kind, Status: r.status, Working: r.status == model.StatusReady, MutationState: r.mutation, LastCheckedAt: r.checked, LastError: r.lastErr, Links: map[string]string{"verify": base + "/verify", "re_onboard": base + "/re-onboard", "usage": base + "/usage"}}
 }
 
 func (s *Service) Adopt(ctx context.Context, p model.Provider, label string, binding model.StoreBinding) (model.Account, *model.ErrorDetail) {
