@@ -30,6 +30,127 @@ type readError struct{}
 
 func (readError) Read([]byte) (int, error) { return 0, errors.New("synthetic read failure") }
 
+type apiRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f apiRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestAccountsExposeClaudeProviderAccountUUIDAndNullWhenUnavailable(t *testing.T) {
+	const accountUUID = "f96d5f01-64dd-45a8-bb36-2d145aa8c817"
+	const profileSecret = "profile-secret-sentinel"
+	profileCalls := map[string]int{}
+	client := &http.Client{Transport: apiRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.Method != http.MethodGet {
+			t.Fatalf("method = %q", req.Method)
+		}
+		authorization := req.Header.Get("Authorization")
+		if req.URL.Path == "/api/oauth/usage" {
+			if authorization != "Bearer account-one-access" && authorization != "Bearer account-two-access" {
+				t.Fatal("usage authorization did not use the registered account")
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"five_hour":{"utilization":0.25}}`)), Request: req}, nil
+		}
+		if req.URL.Path == "/api/oauth/profile" {
+			profileCalls[authorization]++
+			switch authorization {
+			case "Bearer account-one-access":
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"account":{"uuid":"` + accountUUID + `"},"access_token":"` + profileSecret + `"}`)), Request: req}, nil
+			case "Bearer account-two-access":
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"account":{}}`)), Request: req}, nil
+			default:
+				t.Fatal("profile authorization did not use the registered account")
+			}
+		}
+		t.Fatalf("request URL = %q", req.URL)
+		return nil, errors.New("unexpected request")
+	})}
+	service, detail := core.OpenService(t.TempDir(), []provider.Adapter{claude.New(client)}, checker{})
+	if detail != nil {
+		t.Fatal(detail)
+	}
+	defer service.Close()
+
+	accounts := make([]model.Account, 0, 2)
+	for i, token := range []string{"account-one-access", "account-two-access"} {
+		home := filepath.Join(t.TempDir(), "claude")
+		if err := os.MkdirAll(home, 0700); err != nil {
+			t.Fatal(err)
+		}
+		credential, err := json.Marshal(map[string]any{"claudeAiOauth": map[string]any{
+			"accessToken":  token,
+			"refreshToken": "refresh-secret-" + token,
+			"expiresAt":    int64(4102444800000),
+			"scopes":       []string{"user:profile"},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		credentialPath := filepath.Join(home, ".credentials.json")
+		if err := os.WriteFile(credentialPath, credential, 0600); err != nil {
+			t.Fatal(err)
+		}
+		account, detail := service.Adopt(context.Background(), model.ProviderClaude, []string{"first", "second"}[i], model.StoreBinding{Kind: "file", Home: home, CredentialPath: credentialPath})
+		if detail != nil {
+			t.Fatal(detail)
+		}
+		accounts = append(accounts, account)
+	}
+	if profileCalls["Bearer account-one-access"] != 1 || profileCalls["Bearer account-two-access"] != 1 {
+		t.Fatal("the profile was not checked once for each account poll")
+	}
+
+	rr := httptest.NewRecorder()
+	New(service, BuildInfo{}).Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/v1/accounts", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "account-one-access") || strings.Contains(rr.Body.String(), "account-two-access") || strings.Contains(rr.Body.String(), "refresh-secret-") || strings.Contains(rr.Body.String(), profileSecret) {
+		t.Fatalf("account response exposed credential material: %s", rr.Body.String())
+	}
+	var response struct {
+		Accounts []map[string]json.RawMessage `json:"accounts"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Accounts) != 2 {
+		t.Fatalf("account count = %d", len(response.Accounts))
+	}
+	byID := make(map[string]map[string]json.RawMessage, len(response.Accounts))
+	for _, account := range response.Accounts {
+		var id string
+		if err := json.Unmarshal(account["id"], &id); err != nil {
+			t.Fatalf("account id = %s: %v", account["id"], err)
+		}
+		byID[id] = account
+	}
+	for _, account := range accounts {
+		fields, ok := byID[account.ID]
+		if !ok {
+			t.Fatalf("registry account %q was absent", account.ID)
+		}
+		providerUUID, ok := fields["provider_account_uuid"]
+		if !ok {
+			t.Fatalf("provider_account_uuid missing from %s", fields)
+		}
+		if _, ok := fields["providerAccountUuid"]; ok {
+			t.Fatalf("unexpected camelCase property in %s", fields)
+		}
+		if account.ProviderAccountUUID == nil {
+			if string(providerUUID) != "null" {
+				t.Fatalf("missing provider identity encoded as %s", providerUUID)
+			}
+			continue
+		}
+		var got string
+		if err := json.Unmarshal(providerUUID, &got); err != nil || got != accountUUID {
+			t.Fatalf("provider_account_uuid = %s, err=%v", providerUUID, err)
+		}
+		if account.ID == got {
+			t.Fatalf("provider UUID replaced the registry ID: %s", fields)
+		}
+	}
+}
+
 func TestHealthReportsBuildInfo(t *testing.T) {
 	svc, d := core.OpenService(t.TempDir(), nil, checker{})
 	if d != nil {
