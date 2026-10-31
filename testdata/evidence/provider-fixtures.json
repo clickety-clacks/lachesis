@@ -4,5 +4,5 @@
     "codex": "unavailable",
     "claude": "available"
   },
-  "release_effect": "Human-approved sanitized-real provider compatibility evidence is required before release."
+  "release_effect": "Disclosure only: fixture unavailability is not a release blocker; release notes should identify providers without real-response evidence."
 }

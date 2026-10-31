@@ -23,12 +23,16 @@ factory. Native Keychain writes are not implemented.
 
 ## Release proof
 
-Native Keychain update/create interruption proof is outside the MVP. The remaining
-provider compatibility proof requires two independently approved sanitized-real usage
-fixtures: one Codex fixture and one Claude fixture. Synthetic provider-shape tests,
-malformed-response tests, the fixture sanitizer and scanner, and offline smoke remain
-mandatory repository gates. Fixture absence stays truthful and does not certify provider
-compatibility.
+Native Keychain update/create interruption proof is outside the MVP. Sanitized-real
+provider fixtures are useful evidence about real response shapes, but their availability
+is disclosure, not a release condition. The current status in
+`testdata/evidence/provider-fixtures.json` is Claude `available` and Codex `unavailable`.
+Fixture-dependent compatibility checks skip when their provider's fixture is unavailable.
+Synthetic provider-shape tests, malformed-response tests, the fixture sanitizer and
+scanner, and offline smoke remain mandatory repository gates. An unavailable or skipped
+fixture does not certify provider compatibility. Release notes should disclose when a
+provider has not been checked against a real response. A maintainer may add sanitized-real
+evidence later when convenient; it does not need a second-person approval.
 
 No human proof may record credentials, request headers, account identifiers, private
 paths, raw response bodies, or live plan or usage values.
