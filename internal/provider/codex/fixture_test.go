@@ -39,7 +39,7 @@ func TestSanitizedRealUsageFixtures(t *testing.T) {
 	}
 	if count == 0 {
 		requireUnavailableFixtureStatus(t, "codex")
-		t.Skip("approved sanitized-real Codex usage fixture is unavailable; provider compatibility remains a human release proof")
+		t.Skip("sanitized-real Codex usage fixture is unavailable; skipping this fixture-dependent check")
 	}
 }
 

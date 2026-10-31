@@ -16,7 +16,7 @@ func TestDevelopmentBuildInfoDefaults(t *testing.T) {
 
 func TestBuiltBinaryBuildInfoLdflags(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("the exact-commit build gate runs on Gibson Linux")
+		t.Skip("the exact-commit build check requires Linux")
 	}
 	const version = "test-version"
 	const commit = "0123456789abcdef0123456789abcdef01234567"

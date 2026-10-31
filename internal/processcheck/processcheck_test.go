@@ -28,7 +28,7 @@ func TestBusyUsesExactTargetProviderHome(t *testing.T) {
 				metadata string
 				busy     bool
 			}{
-				{name: "unrelated Tightbeam home", metadata: providerTest.homeKey + "=/srv/tightbeam/homes/adapter HOME=/srv/operator"},
+				{name: "unrelated service home", metadata: providerTest.homeKey + "=/srv/other-service/homes/adapter HOME=/srv/operator"},
 				{name: "other account home", metadata: providerTest.homeKey + "=" + otherHome + " HOME=/srv/operator"},
 				{name: "exact target home", metadata: providerTest.homeKey + "=" + targetHome + " HOME=/srv/operator", busy: true},
 			} {
@@ -75,7 +75,7 @@ func TestUnreadableProviderMetadataDoesNotBecomeHostGlobal(t *testing.T) {
 			checker := PS{goos: "linux", run: syntheticPS(
 				"201 "+string(providerName)+"\n202 "+string(providerName)+"\n203 "+string(providerName)+"\n",
 				map[string]string{
-					"201": providerHomeKey(providerName) + "=/srv/tightbeam/homes/adapter HOME=/srv/operator",
+					"201": providerHomeKey(providerName) + "=/srv/other-service/homes/adapter HOME=/srv/operator",
 					"202": providerHomeKey(providerName) + "=/srv/lachesis/providers/" + string(providerName) + "/other HOME=/srv/operator",
 				},
 				map[string]error{"203": errors.New("synthetic metadata refusal")},
