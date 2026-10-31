@@ -1,8 +1,7 @@
-# Optional manual checks
+# Manual verification
 
-These checks can add behavioral evidence and are not release prerequisites. Use disposable
-or designated test accounts. Do not record credentials, account identifiers, email
-addresses, live usage figures, or raw responses.
+Run these checks with disposable or designated test accounts. Do not record credentials,
+account identifiers, email addresses, live usage figures, or raw responses.
 
 1. Adopt four file-backed Codex stores and two file-backed Claude stores. Confirm one aggregate call returns six results.
 2. Complete one API-driven browser onboarding without a file edit.
@@ -14,10 +13,10 @@ addresses, live usage figures, or raw responses.
 The current fixture status is Claude `available` and Codex `unavailable`; see
 `testdata/evidence/provider-fixtures.json`. Fixture-dependent compatibility checks skip
 when the corresponding fixture is unavailable. Real-response fixtures are useful
-compatibility evidence, but one maintainer may add one when convenient; a second-person
-approval is not required. Release notes should disclose when a provider has not been
-checked against a real response. Missing fixtures or fixture approvals alone do not block
-release.
+compatibility evidence. One maintainer may add a sanitized-real fixture when convenient; a
+second-person approval is not required. An unavailable fixture is disclosed and does not
+block release. Release notes should disclose when a provider has not been checked against
+a real response.
 
-Credential loss, disclosure, an inference request, misleading headroom, or failed CLI
-access remains a product issue that must be resolved.
+Any credential loss, disclosure, inference request, misleading headroom, or failed CLI
+access blocks release.
