@@ -28,6 +28,11 @@ type Adapter struct {
 	Now    func() time.Time
 }
 
+type profileMetadata struct {
+	providerAccountUUID *string
+	email               string
+}
+
 func New(client *http.Client) *Adapter {
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
@@ -103,37 +108,51 @@ func (a *Adapter) Usage(ctx context.Context, c provider.Credential) (*model.Usag
 	if detail != nil {
 		return nil, detail
 	}
-	sample.ProviderAccountUUID = a.providerAccountUUID(ctx, c.AccessToken, contains(c.Scopes, "user:profile"))
+	profile := a.accountProfile(ctx, c.AccessToken, contains(c.Scopes, "user:profile"))
+	sample.ProviderAccountUUID = profile.providerAccountUUID
+	sample.ProviderEmail = profile.email
 	return sample, nil
 }
 
-// providerAccountUUID is best-effort so profile failures do not discard valid usage.
-func (a *Adapter) providerAccountUUID(ctx context.Context, accessToken string, hasProfileScope bool) *string {
+// accountProfile is best-effort so profile failures do not discard valid usage.
+func (a *Adapter) accountProfile(ctx context.Context, accessToken string, hasProfileScope bool) profileMetadata {
 	if accessToken == "" || !hasProfileScope {
-		return nil
+		return profileMetadata{}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, profileURL, nil)
 	if err != nil {
-		return nil
+		return profileMetadata{}
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	resp, err := a.Client.Do(req)
 	if err != nil {
-		return nil
+		return profileMetadata{}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil
+		return profileMetadata{}
 	}
 	var profile struct {
 		Account struct {
-			UUID string `json:"uuid"`
+			UUID  string          `json:"uuid"`
+			Email json.RawMessage `json:"email"`
 		} `json:"account"`
 	}
-	if json.NewDecoder(resp.Body).Decode(&profile) != nil || profile.Account.UUID == "" {
-		return nil
+	if json.NewDecoder(resp.Body).Decode(&profile) != nil {
+		return profileMetadata{}
 	}
-	return &profile.Account.UUID
+	metadata := profileMetadata{}
+	if profile.Account.UUID != "" {
+		accountUUID := profile.Account.UUID
+		metadata.providerAccountUUID = &accountUUID
+	}
+	if len(profile.Account.Email) > 0 {
+		var email string
+		if json.Unmarshal(profile.Account.Email, &email) == nil {
+			metadata.email = strings.TrimSpace(email)
+		}
+	}
+	return metadata
 }
 
 func (a *Adapter) rateLimited(retryAfter, message, helpTopic string) *model.ErrorDetail {

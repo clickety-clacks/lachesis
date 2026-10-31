@@ -32,6 +32,7 @@ type runtimeAccount struct {
 	checked             *time.Time
 	lastErr             *model.ErrorDetail
 	providerAccountUUID *string
+	providerEmail       string
 	refreshRetryAt      time.Time
 }
 
@@ -112,6 +113,7 @@ func (s *Service) recordUsage(id string, sample model.UsageSample) {
 			providerAccountUUID := *sample.ProviderAccountUUID
 			r.providerAccountUUID = &providerAccountUUID
 		}
+		r.providerEmail = sample.ProviderEmail
 		r.mu.Unlock()
 	}
 	if s.history == nil {
@@ -276,7 +278,7 @@ func (s *Service) accountView(a model.RegistryAccount) model.Account {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	base := "/api/v1/accounts/" + a.ID
-	return model.Account{ID: a.ID, Label: a.Label, Provider: a.Provider, ProviderAccountUUID: r.providerAccountUUID, StoreKind: a.Store.Kind, Status: r.status, Working: r.status == model.StatusReady, MutationState: r.mutation, LastCheckedAt: r.checked, LastError: r.lastErr, Links: map[string]string{"verify": base + "/verify", "re_onboard": base + "/re-onboard", "usage": base + "/usage"}}
+	return model.Account{ID: a.ID, Label: a.Label, Email: r.providerEmail, Provider: a.Provider, ProviderAccountUUID: r.providerAccountUUID, StoreKind: a.Store.Kind, Status: r.status, Working: r.status == model.StatusReady, MutationState: r.mutation, LastCheckedAt: r.checked, LastError: r.lastErr, Links: map[string]string{"verify": base + "/verify", "re_onboard": base + "/re-onboard", "usage": base + "/usage"}}
 }
 
 func (s *Service) Adopt(ctx context.Context, p model.Provider, label string, binding model.StoreBinding) (model.Account, *model.ErrorDetail) {

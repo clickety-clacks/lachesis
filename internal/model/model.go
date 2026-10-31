@@ -97,6 +97,7 @@ type ErrorEnvelope struct {
 type Account struct {
 	ID                  string            `json:"id"`
 	Label               string            `json:"label"`
+	Email               string            `json:"email,omitempty"`
 	Provider            Provider          `json:"provider"`
 	ProviderAccountUUID *string           `json:"provider_account_uuid"`
 	StoreKind           string            `json:"store_kind"`
@@ -124,8 +125,9 @@ type Diagnostic struct {
 type UsageSample struct {
 	AccountID string   `json:"account_id"`
 	Provider  Provider `json:"provider"`
-	// ProviderAccountUUID is carried in memory to the registered-account response only.
+	// Provider identity metadata is carried in memory to the registered-account response only.
 	ProviderAccountUUID *string         `json:"-"`
+	ProviderEmail       string          `json:"-"`
 	Label               string          `json:"label"`
 	Plan                *string         `json:"plan"`
 	ObservedAt          time.Time       `json:"observed_at"`

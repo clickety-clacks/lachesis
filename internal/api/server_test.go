@@ -34,9 +34,10 @@ type apiRoundTripper func(*http.Request) (*http.Response, error)
 
 func (f apiRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
-func TestAccountsExposeClaudeProviderAccountUUIDAndNullWhenUnavailable(t *testing.T) {
+func TestAccountsExposeClaudeProfileEmailBestEffortAndProviderUUID(t *testing.T) {
 	const accountUUID = "f96d5f01-64dd-45a8-bb36-2d145aa8c817"
 	const profileSecret = "profile-secret-sentinel"
+	const profileEmail = "claude.primary@example.test"
 	profileCalls := map[string]int{}
 	client := &http.Client{Transport: apiRoundTripper(func(req *http.Request) (*http.Response, error) {
 		if req.Method != http.MethodGet {
@@ -44,7 +45,7 @@ func TestAccountsExposeClaudeProviderAccountUUIDAndNullWhenUnavailable(t *testin
 		}
 		authorization := req.Header.Get("Authorization")
 		if req.URL.Path == "/api/oauth/usage" {
-			if authorization != "Bearer account-one-access" && authorization != "Bearer account-two-access" {
+			if authorization != "Bearer account-one-access" && authorization != "Bearer account-two-access" && authorization != "Bearer account-three-access" && authorization != "Bearer account-four-access" {
 				t.Fatal("usage authorization did not use the registered account")
 			}
 			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"five_hour":{"utilization":0.25}}`)), Request: req}, nil
@@ -53,9 +54,13 @@ func TestAccountsExposeClaudeProviderAccountUUIDAndNullWhenUnavailable(t *testin
 			profileCalls[authorization]++
 			switch authorization {
 			case "Bearer account-one-access":
-				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"account":{"uuid":"` + accountUUID + `"},"access_token":"` + profileSecret + `"}`)), Request: req}, nil
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"account":{"uuid":"` + accountUUID + `","email":"` + profileEmail + `"},"access_token":"` + profileSecret + `"}`)), Request: req}, nil
 			case "Bearer account-two-access":
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"account":{"email":""}}`)), Request: req}, nil
+			case "Bearer account-three-access":
 				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"account":{}}`)), Request: req}, nil
+			case "Bearer account-four-access":
+				return &http.Response{StatusCode: http.StatusServiceUnavailable, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`)), Request: req}, nil
 			default:
 				t.Fatal("profile authorization did not use the registered account")
 			}
@@ -69,15 +74,24 @@ func TestAccountsExposeClaudeProviderAccountUUIDAndNullWhenUnavailable(t *testin
 	}
 	defer service.Close()
 
-	accounts := make([]model.Account, 0, 2)
-	for i, token := range []string{"account-one-access", "account-two-access"} {
+	cases := []struct {
+		token string
+		label string
+	}{
+		{token: "account-one-access", label: "first"},
+		{token: "account-two-access", label: "second"},
+		{token: "account-three-access", label: "third"},
+		{token: "account-four-access", label: "fourth"},
+	}
+	accounts := make([]model.Account, 0, len(cases))
+	for _, item := range cases {
 		home := filepath.Join(t.TempDir(), "claude")
 		if err := os.MkdirAll(home, 0700); err != nil {
 			t.Fatal(err)
 		}
 		credential, err := json.Marshal(map[string]any{"claudeAiOauth": map[string]any{
-			"accessToken":  token,
-			"refreshToken": "refresh-secret-" + token,
+			"accessToken":  item.token,
+			"refreshToken": "refresh-secret-" + item.token,
 			"expiresAt":    int64(4102444800000),
 			"scopes":       []string{"user:profile"},
 		}})
@@ -88,14 +102,16 @@ func TestAccountsExposeClaudeProviderAccountUUIDAndNullWhenUnavailable(t *testin
 		if err := os.WriteFile(credentialPath, credential, 0600); err != nil {
 			t.Fatal(err)
 		}
-		account, detail := service.Adopt(context.Background(), model.ProviderClaude, []string{"first", "second"}[i], model.StoreBinding{Kind: "file", Home: home, CredentialPath: credentialPath})
+		account, detail := service.Adopt(context.Background(), model.ProviderClaude, item.label, model.StoreBinding{Kind: "file", Home: home, CredentialPath: credentialPath})
 		if detail != nil {
 			t.Fatal(detail)
 		}
 		accounts = append(accounts, account)
 	}
-	if profileCalls["Bearer account-one-access"] != 1 || profileCalls["Bearer account-two-access"] != 1 {
-		t.Fatal("the profile was not checked once for each account poll")
+	for _, item := range cases {
+		if profileCalls["Bearer "+item.token] != 1 {
+			t.Fatalf("the profile was not checked once for account %q", item.label)
+		}
 	}
 
 	rr := httptest.NewRecorder()
@@ -103,7 +119,7 @@ func TestAccountsExposeClaudeProviderAccountUUIDAndNullWhenUnavailable(t *testin
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", rr.Code, rr.Body.String())
 	}
-	if strings.Contains(rr.Body.String(), "account-one-access") || strings.Contains(rr.Body.String(), "account-two-access") || strings.Contains(rr.Body.String(), "refresh-secret-") || strings.Contains(rr.Body.String(), profileSecret) {
+	if strings.Contains(rr.Body.String(), "account-one-access") || strings.Contains(rr.Body.String(), "account-two-access") || strings.Contains(rr.Body.String(), "account-three-access") || strings.Contains(rr.Body.String(), "account-four-access") || strings.Contains(rr.Body.String(), "refresh-secret-") || strings.Contains(rr.Body.String(), profileSecret) {
 		t.Fatalf("account response exposed credential material: %s", rr.Body.String())
 	}
 	var response struct {
@@ -112,7 +128,7 @@ func TestAccountsExposeClaudeProviderAccountUUIDAndNullWhenUnavailable(t *testin
 	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if len(response.Accounts) != 2 {
+	if len(response.Accounts) != len(cases) {
 		t.Fatalf("account count = %d", len(response.Accounts))
 	}
 	byID := make(map[string]map[string]json.RawMessage, len(response.Accounts))
@@ -127,6 +143,23 @@ func TestAccountsExposeClaudeProviderAccountUUIDAndNullWhenUnavailable(t *testin
 		fields, ok := byID[account.ID]
 		if !ok {
 			t.Fatalf("registry account %q was absent", account.ID)
+		}
+		if !account.Working {
+			t.Fatalf("optional profile metadata blocked account %q", account.Label)
+		}
+		var label string
+		if err := json.Unmarshal(fields["label"], &label); err != nil || label != account.Label {
+			t.Fatalf("account label was not preserved: %s, err=%v", fields["label"], err)
+		}
+		if account.Label == "first" {
+			var email string
+			if err := json.Unmarshal(fields["email"], &email); err != nil || email != profileEmail || account.Email != profileEmail {
+				t.Fatalf("available profile email was not projected, err=%v", err)
+			}
+		} else if account.Email != "" {
+			t.Fatalf("unavailable profile email was retained for account %q", account.Label)
+		} else if _, ok := fields["email"]; ok {
+			t.Fatalf("empty profile email was projected for account %q", account.Label)
 		}
 		providerUUID, ok := fields["provider_account_uuid"]
 		if !ok {
