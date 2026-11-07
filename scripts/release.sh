@@ -65,7 +65,7 @@ ldflags="-X main.buildVersion=$version -X main.buildCommit=$commit"
 build() {
   goos=$1
   goarch=$2
-  output=$release_dir/lachesis-$goos-$goarch
+  output="$release_dir/lachesis_${tag}_${goos}_${goarch}"
   (
     cd "$source_dir"
     CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch \
@@ -77,13 +77,13 @@ build linux amd64
 build darwin arm64
 (
   cd "$release_dir"
-  LC_ALL=C sha256sum lachesis-darwin-arm64 lachesis-linux-amd64 >SHA256SUMS
+  LC_ALL=C sha256sum "lachesis_${tag}_darwin_arm64" "lachesis_${tag}_linux_amd64" >SHA256SUMS
 )
 
 if [ "$dry_run" = true ]; then
   echo "dry-run: built $tag from $commit"
   cat "$release_dir/SHA256SUMS"
-  echo "dry-run: would publish $tag to $github_repo with lachesis-linux-amd64, lachesis-darwin-arm64, and SHA256SUMS"
+  echo "dry-run: would publish $tag to $github_repo with lachesis_${tag}_linux_amd64, lachesis_${tag}_darwin_arm64, and SHA256SUMS"
   exit 0
 fi
 
@@ -104,8 +104,8 @@ if [ "$current_commit" != "$commit" ]; then
 fi
 
 gh release create "$tag" \
-  "$release_dir/lachesis-linux-amd64" \
-  "$release_dir/lachesis-darwin-arm64" \
+  "$release_dir/lachesis_${tag}_linux_amd64" \
+  "$release_dir/lachesis_${tag}_darwin_arm64" \
   "$release_dir/SHA256SUMS" \
   --verify-tag \
   --generate-notes \
