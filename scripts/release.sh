@@ -41,11 +41,6 @@ fi
 if commit=$(git -C "$repo_dir" rev-parse --verify "refs/tags/$tag^{commit}" 2>/dev/null); then
   :
 else
-  status=$?
-  if [ "$status" -eq 126 ] || [ "$status" -eq 127 ]; then
-    echo "required command failed: git" >&2
-    exit 1
-  fi
   echo "release tag does not exist locally: $tag" >&2
   exit 2
 fi
@@ -85,22 +80,6 @@ if [ "$dry_run" = true ]; then
   cat "$release_dir/SHA256SUMS"
   echo "dry-run: would publish $tag to $github_repo with lachesis_${tag}_linux_amd64, lachesis_${tag}_darwin_arm64, and SHA256SUMS"
   exit 0
-fi
-
-if current_commit=$(git -C "$repo_dir" rev-parse --verify "refs/tags/$tag^{commit}" 2>/dev/null); then
-  :
-else
-  status=$?
-  if [ "$status" -eq 126 ] || [ "$status" -eq 127 ]; then
-    echo "required command failed: git" >&2
-    exit 1
-  fi
-  echo "release tag no longer exists locally: $tag" >&2
-  exit 1
-fi
-if [ "$current_commit" != "$commit" ]; then
-  echo "release tag changed while building: $tag" >&2
-  exit 1
 fi
 
 gh release create "$tag" \
