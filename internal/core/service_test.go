@@ -381,8 +381,14 @@ func TestAggregatePassesDiagnosticsAndIsolatesFatalAccount(t *testing.T) {
 	if aggregate.Results[0].Status != "live" || aggregate.Results[0].Sample == nil || len(aggregate.Results[0].Sample.Diagnostics) != 1 || aggregate.Results[0].Sample.Diagnostics[0].Code != "CODEX_USAGE_WINDOW_OMITTED" {
 		t.Fatalf("degraded result = %#v", aggregate.Results[0])
 	}
+	if aggregate.Results[0].Summary.Label != "degraded" || aggregate.Results[0].Summary.Provider != model.ProviderCodex || aggregate.Results[0].Summary.UsageFreshness != "current" {
+		t.Fatalf("successful result summary = %#v", aggregate.Results[0].Summary)
+	}
 	if aggregate.Results[1].Status != "error" || aggregate.Results[1].Sample != nil || aggregate.Results[1].Error == nil || aggregate.Results[1].Error.Code != teach.UpstreamContractChanged {
 		t.Fatalf("failed result = %#v", aggregate.Results[1])
+	}
+	if aggregate.Results[1].Summary.Label != "failed" || aggregate.Results[1].Summary.Provider != model.ProviderClaude || aggregate.Results[1].Summary.AccountState != model.StatusDegraded || pointerValue(aggregate.Results[1].Summary.AccountStateReason) != teach.UpstreamContractChanged || aggregate.Results[1].Summary.UsageFreshness != "none" || pointerValue(aggregate.Results[1].Summary.UsageFreshnessReason) != teach.UpstreamContractChanged {
+		t.Fatalf("failed result summary = %#v", aggregate.Results[1].Summary)
 	}
 	if aggregate.Counts["live"] != 1 || aggregate.Counts["error"] != 1 || aggregate.Counts["cache"] != 0 || aggregate.Counts["stale"] != 0 {
 		t.Fatalf("counts = %#v", aggregate.Counts)

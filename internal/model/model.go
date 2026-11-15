@@ -249,11 +249,31 @@ type AggregateForecast struct {
 	Diagnostics []Diagnostic        `json:"diagnostics,omitempty"`
 }
 
+type UsageSummary struct {
+	Label                              string        `json:"label"`
+	Provider                           Provider      `json:"provider"`
+	AccountState                       AccountStatus `json:"account_state"`
+	AccountStateReason                 *string       `json:"account_state_reason"`
+	UsageFreshness                     string        `json:"usage_freshness"`
+	UsageFreshnessReason               *string       `json:"usage_freshness_reason"`
+	UsageObservedAt                    *time.Time    `json:"usage_observed_at"`
+	UsageAgeSeconds                    *int64        `json:"usage_age_seconds"`
+	Plan                               *string       `json:"plan"`
+	PlanUnknownReason                  *string       `json:"plan_unknown_reason"`
+	SubscriptionStatus                 string        `json:"subscription_status"`
+	SubscriptionStatusReason           *string       `json:"subscription_status_reason"`
+	SubscriptionPeriodEndAt            *time.Time    `json:"subscription_period_end_at"`
+	SubscriptionPeriodEndKind          *string       `json:"subscription_period_end_kind"`
+	SubscriptionPeriodEndUnknownReason *string       `json:"subscription_period_end_unknown_reason"`
+	SubscriptionObservedAt             *time.Time    `json:"subscription_observed_at"`
+}
+
 type UsageResult struct {
 	AccountID string       `json:"account_id"`
 	Status    string       `json:"status"`
 	Sample    *UsageSample `json:"sample"`
 	Error     *ErrorDetail `json:"error"`
+	Summary   UsageSummary `json:"summary"`
 }
 
 type AggregateUsage struct {

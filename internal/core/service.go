@@ -495,6 +495,7 @@ func (s *Service) Usage(ctx context.Context, id, mode string) (model.UsageResult
 	if result.Status == "error" {
 		return model.UsageResult{}, result.Error
 	}
+	result.Summary = s.usageSummary(row, result)
 	return result, nil
 }
 
@@ -536,6 +537,7 @@ func (s *Service) Aggregate(ctx context.Context, mode string) (model.AggregateUs
 	out := model.AggregateUsage{GeneratedAt: s.now().UTC(), Results: make([]model.UsageResult, len(rows)), Counts: map[string]int{"live": 0, "cache": 0, "stale": 0, "error": 0}}
 	for range rows {
 		x := <-ch
+		x.r.Summary = s.usageSummary(rows[x.i], x.r)
 		out.Results[x.i] = x.r
 		out.Counts[x.r.Status]++
 	}
