@@ -271,9 +271,9 @@ func TestBackgroundFreshCacheHitRetainsRecentFailure(t *testing.T) {
 	now := time.Date(2026, time.November, 15, 12, 0, 0, 0, time.UTC)
 	cache := NewCache()
 	cache.now = func() time.Time { return now }
-	cache.Install("synthetic-account", model.UsageSample{ObservedAt: now.Add(-20 * time.Second)})
+	cache.Install("", model.UsageSample{ObservedAt: now.Add(-20 * time.Second)})
 	failure := &model.ErrorDetail{Code: "UPSTREAM_UNAVAILABLE"}
-	_, _, started := cache.FetchForced(context.Background(), "synthetic-account", func(context.Context) (*model.UsageSample, *model.ErrorDetail) {
+	_, _, started := cache.FetchForced(context.Background(), "", func(context.Context) (*model.UsageSample, *model.ErrorDetail) {
 		return nil, failure
 	})
 	if !started {
@@ -281,7 +281,7 @@ func TestBackgroundFreshCacheHitRetainsRecentFailure(t *testing.T) {
 	}
 
 	service := &Service{cache: cache, now: func() time.Time { return now }}
-	row := model.RegistryAccount{ID: "synthetic-account", Label: "work", Provider: model.ProviderCodex}
+	row := model.RegistryAccount{Label: "work", Provider: model.ProviderCodex}
 	result := service.usageResult(context.Background(), row, "background")
 	if result.Status != "cache" || result.Sample == nil || result.Error != failure {
 		t.Fatalf("fresh cache hit lost the last failure or changed result status: %#v", result)
