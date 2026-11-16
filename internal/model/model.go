@@ -288,6 +288,8 @@ type UsageResult struct {
 	Sample    *UsageSample `json:"sample"`
 	Error     *ErrorDetail `json:"error"`
 	Summary   UsageSummary `json:"summary"`
+	// SummaryError carries cache diagnostics into summary construction only.
+	SummaryError *ErrorDetail `json:"-"`
 }
 
 type AggregateUsage struct {

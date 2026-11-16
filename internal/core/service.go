@@ -548,7 +548,7 @@ func (s *Service) usageResult(ctx context.Context, row model.RegistryAccount, mo
 	sample, lastErr := s.cache.Peek(row.ID)
 	fresh := sample != nil && sample.AgeSeconds <= 30
 	if mode == "background" && fresh {
-		return model.UsageResult{AccountID: row.ID, Status: "cache", Sample: sample, Error: lastErr}
+		return model.UsageResult{AccountID: row.ID, Status: "cache", Sample: sample, SummaryError: lastErr}
 	}
 	if mode == "background" && sample != nil {
 		go s.cache.Fetch(context.Background(), row.ID, func(ctx context.Context) (*model.UsageSample, *model.ErrorDetail) { return s.fetchAccount(ctx, row) })

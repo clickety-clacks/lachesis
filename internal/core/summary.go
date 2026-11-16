@@ -14,6 +14,9 @@ func (s *Service) usageSummary(row model.RegistryAccount, result model.UsageResu
 			previous = &last
 		}
 	}
+	if result.SummaryError != nil {
+		result.Error = result.SummaryError
+	}
 	return buildUsageSummary(row, s.accountView(row), result, previous, generatedAt)
 }
 

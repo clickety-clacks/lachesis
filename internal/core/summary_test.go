@@ -267,7 +267,7 @@ func TestUsageSummaryStaleAndPendingRefreshPreserveSubscriptionFacts(t *testing.
 	}
 }
 
-func TestBackgroundFreshCacheHitRetainsRecentFailure(t *testing.T) {
+func TestBackgroundFreshCacheHitKeepsWireErrorNilAndSummaryStale(t *testing.T) {
 	now := time.Date(2026, time.November, 15, 12, 0, 0, 0, time.UTC)
 	cache := NewCache()
 	cache.now = func() time.Time { return now }
@@ -280,15 +280,37 @@ func TestBackgroundFreshCacheHitRetainsRecentFailure(t *testing.T) {
 		t.Fatal("forced failure check did not start")
 	}
 
-	service := &Service{cache: cache, now: func() time.Time { return now }}
+	service := &Service{
+		cache: cache,
+		now:   func() time.Time { return now },
+		state: map[string]*runtimeAccount{"": {status: model.StatusDegraded, lastErr: failure}},
+	}
 	row := model.RegistryAccount{Label: "work", Provider: model.ProviderCodex}
 	result := service.usageResult(context.Background(), row, "background")
-	if result.Status != "cache" || result.Sample == nil || result.Error != failure {
-		t.Fatalf("fresh cache hit lost the last failure or changed result status: %#v", result)
+	if result.Status != "cache" || result.Sample == nil || result.Error != nil || result.SummaryError != failure {
+		t.Fatalf("fresh cache hit changed the existing result or lost summary diagnostics: %#v", result)
 	}
-	summary := buildUsageSummary(row, model.Account{Status: model.StatusDegraded, LastError: failure}, result, nil, now)
+	result.Summary = service.usageSummary(row, result, now)
+	if result.Error != nil {
+		t.Fatalf("summary construction changed the existing result error: %#v", result.Error)
+	}
+	summary := result.Summary
 	if summary.UsageFreshness != "stale" || pointerValue(summary.UsageFreshnessReason) != failure.Code {
 		t.Fatalf("fresh cache hit hid the latest completed failure: %q / %v", summary.UsageFreshness, summary.UsageFreshnessReason)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if string(fields["error"]) != "null" {
+		t.Fatalf("wire error = %s, want null", fields["error"])
+	}
+	if _, ok := fields["summary_error"]; ok {
+		t.Fatalf("internal summary diagnostic leaked in response: %s", encoded)
 	}
 }
 
