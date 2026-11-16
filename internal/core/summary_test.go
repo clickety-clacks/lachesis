@@ -157,9 +157,9 @@ func TestUsageSummaryCodexActiveUntilUsesStatementAndGeneratedTime(t *testing.T)
 			Plan:       &plan,
 			ObservedAt: generatedAt,
 			Subscription: &model.UsageSubscription{
-				PeriodEndAt:  &periodEnd,
+				PeriodEndAt:   &periodEnd,
 				PeriodEndKind: &kind,
-				ObservedAt:   &statementAt,
+				ObservedAt:    &statementAt,
 			},
 		},
 	}
@@ -189,9 +189,9 @@ func TestUsageSummaryCodexActiveUntilLapsedAndPassedCases(t *testing.T) {
 		Plan:       &plan,
 		ObservedAt: generatedAt,
 		Subscription: &model.UsageSubscription{
-			PeriodEndAt:  &end,
+			PeriodEndAt:   &end,
 			PeriodEndKind: &kind,
-			ObservedAt:   &statementAt,
+			ObservedAt:    &statementAt,
 		},
 	}
 	summary := buildUsageSummary(summaryTestRow(), model.Account{Status: model.StatusReady}, model.UsageResult{Status: "live", Sample: &sample}, nil, generatedAt)
@@ -223,7 +223,7 @@ func TestUsageSummaryClaudeUsesCredentialPlanAndProfileStatus(t *testing.T) {
 				Plan:                   &plan,
 				Status:                 "active",
 				PeriodEndUnknownReason: stringPointer("not_yet_observed"),
-				ObservedAt:              &observedAt,
+				ObservedAt:             &observedAt,
 			},
 		},
 	}

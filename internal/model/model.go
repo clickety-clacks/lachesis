@@ -126,16 +126,16 @@ type UsageSample struct {
 	AccountID string   `json:"account_id"`
 	Provider  Provider `json:"provider"`
 	// Provider identity metadata is carried in memory to the registered-account response only.
-	ProviderAccountUUID *string         `json:"-"`
-	ProviderEmail       string          `json:"-"`
-	Label               string          `json:"label"`
-	Plan                *string         `json:"plan"`
-	ObservedAt          time.Time       `json:"observed_at"`
-	AgeSeconds          int64           `json:"age_seconds"`
-	Windows             []Window        `json:"windows"`
-	Diagnostics         []Diagnostic    `json:"diagnostics"`
-	Raw                 json.RawMessage `json:"raw"`
-	Subscription        *UsageSubscription `json:"-"`
+	ProviderAccountUUID *string              `json:"-"`
+	ProviderEmail       string               `json:"-"`
+	Label               string               `json:"label"`
+	Plan                *string              `json:"plan"`
+	ObservedAt          time.Time            `json:"observed_at"`
+	AgeSeconds          int64                `json:"age_seconds"`
+	Windows             []Window             `json:"windows"`
+	Diagnostics         []Diagnostic         `json:"diagnostics"`
+	Raw                 json.RawMessage      `json:"raw"`
+	Subscription        *UsageSubscription   `json:"-"`
 }
 
 // UsageSubscription holds normalized provider statements for summary assembly.

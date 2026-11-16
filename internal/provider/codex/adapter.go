@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -537,3 +536,5 @@ func upstream(err error) *model.ErrorDetail {
 	}
 	return detail(teach.UpstreamUnavailable, "Codex is unavailable.")
 }
+
+func stringPtr(value string) *string { return &value }
