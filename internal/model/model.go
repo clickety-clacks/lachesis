@@ -126,29 +126,29 @@ type UsageSample struct {
 	AccountID string   `json:"account_id"`
 	Provider  Provider `json:"provider"`
 	// Provider identity metadata is carried in memory to the registered-account response only.
-	ProviderAccountUUID *string              `json:"-"`
-	ProviderEmail       string               `json:"-"`
-	Label               string               `json:"label"`
-	Plan                *string              `json:"plan"`
-	ObservedAt          time.Time            `json:"observed_at"`
-	AgeSeconds          int64                `json:"age_seconds"`
-	Windows             []Window             `json:"windows"`
-	Diagnostics         []Diagnostic         `json:"diagnostics"`
-	Raw                 json.RawMessage      `json:"raw"`
-	Subscription        *UsageSubscription   `json:"-"`
+	ProviderAccountUUID *string            `json:"-"`
+	ProviderEmail       string             `json:"-"`
+	Label               string             `json:"label"`
+	Plan                *string            `json:"plan"`
+	ObservedAt          time.Time          `json:"observed_at"`
+	AgeSeconds          int64              `json:"age_seconds"`
+	Windows             []Window           `json:"windows"`
+	Diagnostics         []Diagnostic       `json:"diagnostics"`
+	Raw                 json.RawMessage    `json:"raw"`
+	Subscription        *UsageSubscription `json:"-"`
 }
 
 // UsageSubscription holds normalized provider statements for summary assembly.
 // It is intentionally omitted from UsageSample's public and persisted JSON.
 type UsageSubscription struct {
-	Plan                               *string
-	PlanUnknownReason                  *string
-	Status                             string
-	StatusReason                       *string
-	PeriodEndAt                        *time.Time
-	PeriodEndKind                      *string
-	PeriodEndUnknownReason             *string
-	ObservedAt                         *time.Time
+	Plan                   *string
+	PlanUnknownReason      *string
+	Status                 string
+	StatusReason           *string
+	PeriodEndAt            *time.Time
+	PeriodEndKind          *string
+	PeriodEndUnknownReason *string
+	ObservedAt             *time.Time
 }
 
 // UsageHistorySample is the persisted, provider-neutral subset of a usage

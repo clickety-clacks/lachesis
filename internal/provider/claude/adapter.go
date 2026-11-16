@@ -169,7 +169,7 @@ func (a *Adapter) accountProfile(ctx context.Context, accessToken string, hasPro
 		Status:                 status,
 		StatusReason:           statusReason,
 		PeriodEndUnknownReason: stringPtr("not_yet_observed"),
-		ObservedAt:              &observedAt,
+		ObservedAt:             &observedAt,
 	}}
 	if profile.Account.UUID != "" {
 		accountUUID := profile.Account.UUID

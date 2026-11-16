@@ -295,7 +295,7 @@ func TestBackgroundFreshCacheHitRetainsRecentFailure(t *testing.T) {
 func TestUsageSampleOmitsInternalSubscriptionFacts(t *testing.T) {
 	plan := "max"
 	encoded, err := json.Marshal(model.UsageSample{
-		Provider: model.ProviderClaude,
+		Provider:     model.ProviderClaude,
 		Subscription: &model.UsageSubscription{Plan: &plan, Status: "active"},
 	})
 	if err != nil {
