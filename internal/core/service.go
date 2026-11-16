@@ -495,6 +495,7 @@ func (s *Service) Usage(ctx context.Context, id, mode string) (model.UsageResult
 	if result.Status == "error" {
 		return model.UsageResult{}, result.Error
 	}
+	result.Summary = s.usageSummary(row, result, s.now().UTC())
 	return result, nil
 }
 
@@ -536,6 +537,7 @@ func (s *Service) Aggregate(ctx context.Context, mode string) (model.AggregateUs
 	out := model.AggregateUsage{GeneratedAt: s.now().UTC(), Results: make([]model.UsageResult, len(rows)), Counts: map[string]int{"live": 0, "cache": 0, "stale": 0, "error": 0}}
 	for range rows {
 		x := <-ch
+		x.r.Summary = s.usageSummary(rows[x.i], x.r, out.GeneratedAt)
 		out.Results[x.i] = x.r
 		out.Counts[x.r.Status]++
 	}
@@ -546,7 +548,7 @@ func (s *Service) usageResult(ctx context.Context, row model.RegistryAccount, mo
 	sample, lastErr := s.cache.Peek(row.ID)
 	fresh := sample != nil && sample.AgeSeconds <= 30
 	if mode == "background" && fresh {
-		return model.UsageResult{AccountID: row.ID, Status: "cache", Sample: sample}
+		return model.UsageResult{AccountID: row.ID, Status: "cache", Sample: sample, SummaryError: lastErr}
 	}
 	if mode == "background" && sample != nil {
 		go s.cache.Fetch(context.Background(), row.ID, func(ctx context.Context) (*model.UsageSample, *model.ErrorDetail) { return s.fetchAccount(ctx, row) })

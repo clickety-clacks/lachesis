@@ -1,10 +1,12 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,6 +24,8 @@ import (
 const usageURL = "https://chatgpt.com/backend-api/wham/usage"
 const tokenURL = "https://auth.openai.com/oauth/token"
 const clientID = "app_EMoamEEZ73f0CkXaXp7hrann"
+const codexSubscriptionActiveUntil = "chatgpt_subscription_active_until"
+const codexSubscriptionLastChecked = "chatgpt_subscription_last_checked"
 
 type Adapter struct {
 	Client *http.Client
@@ -92,7 +96,158 @@ func (a *Adapter) Usage(ctx context.Context, c provider.Credential) (*model.Usag
 	if !provider.RawUsageSafe(raw) {
 		return nil, detail(teach.UpstreamContractChanged, "Codex usage contained a credential-bearing field.")
 	}
-	return normalize(raw, a.Now())
+	sample, detail := normalize(raw, a.now())
+	if detail != nil {
+		return nil, detail
+	}
+	sample.Subscription = codexSubscription(c.IDToken, sample.ObservedAt)
+	return sample, nil
+}
+
+func codexSubscription(idToken string, readAt time.Time) *model.UsageSubscription {
+	facts := &model.UsageSubscription{Status: "unknown"}
+
+	claims, err := idTokenClaims(idToken)
+	if err != nil {
+		if !readAt.IsZero() {
+			observedAt := readAt.UTC()
+			facts.ObservedAt = &observedAt
+		}
+		reason := "not_yet_observed"
+		if strings.TrimSpace(idToken) != "" {
+			reason = "unrecognized_value"
+		}
+		facts.StatusReason = stringPtr(reason)
+		facts.PeriodEndUnknownReason = stringPtr(reason)
+		return facts
+	}
+
+	lastChecked, lastCheckedPresent, lastCheckedConflict := findJSONField(claims, codexSubscriptionLastChecked)
+	issuedAt, issuedAtPresent, issuedAtConflict := findJSONField(claims, "iat")
+	if lastCheckedPresent && !lastCheckedConflict {
+		if observedAt, ok := parseProviderTime(lastChecked); ok {
+			facts.ObservedAt = &observedAt
+		}
+	}
+	if facts.ObservedAt == nil && issuedAtPresent && !issuedAtConflict {
+		if observedAt, ok := parseProviderTime(issuedAt); ok {
+			facts.ObservedAt = &observedAt
+		}
+	}
+	if facts.ObservedAt == nil && !readAt.IsZero() {
+		observedAt := readAt.UTC()
+		facts.ObservedAt = &observedAt
+	}
+
+	activeUntil, present, conflict := findJSONField(claims, codexSubscriptionActiveUntil)
+	if conflict {
+		facts.StatusReason = stringPtr("unrecognized_value")
+		facts.PeriodEndUnknownReason = stringPtr("unrecognized_value")
+		return facts
+	}
+	if !present {
+		facts.StatusReason = stringPtr("not_exposed_by_provider")
+		facts.PeriodEndUnknownReason = stringPtr("not_exposed_by_provider")
+		return facts
+	}
+	periodEnd, ok := parseProviderTime(activeUntil)
+	if !ok {
+		facts.StatusReason = stringPtr("unrecognized_value")
+		facts.PeriodEndUnknownReason = stringPtr("unrecognized_value")
+		return facts
+	}
+	facts.PeriodEndAt = &periodEnd
+	kind := "unstated"
+	if facts.ObservedAt != nil && periodEnd.Before(*facts.ObservedAt) {
+		kind = "expires"
+	}
+	facts.PeriodEndKind = stringPtr(kind)
+	return facts
+}
+
+func idTokenClaims(token string) (json.RawMessage, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("invalid id token")
+	}
+	claims, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil || !jsonObject(claims) {
+		return nil, fmt.Errorf("invalid id token claims")
+	}
+	return claims, nil
+}
+
+func findJSONField(document json.RawMessage, target string) (json.RawMessage, bool, bool) {
+	var found json.RawMessage
+	present := false
+	conflict := false
+	var visit func(json.RawMessage)
+	visit = func(raw json.RawMessage) {
+		var object map[string]json.RawMessage
+		if json.Unmarshal(raw, &object) == nil && object != nil {
+			for key, value := range object {
+				if key == target {
+					if present && !bytes.Equal(bytes.TrimSpace(found), bytes.TrimSpace(value)) {
+						conflict = true
+					} else {
+						found = append(found[:0], value...)
+						present = true
+					}
+				}
+				visit(value)
+			}
+			return
+		}
+		var array []json.RawMessage
+		if json.Unmarshal(raw, &array) == nil {
+			for _, value := range array {
+				visit(value)
+			}
+		}
+	}
+	visit(document)
+	return found, present, conflict
+}
+
+func parseProviderTime(raw json.RawMessage) (time.Time, bool) {
+	var value string
+	if json.Unmarshal(raw, &value) == nil {
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+			if parsed, err := time.Parse(layout, value); err == nil {
+				return parsed.UTC(), true
+			}
+		}
+		return time.Time{}, false
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var numeric json.Number
+	if decoder.Decode(&numeric) != nil {
+		return time.Time{}, false
+	}
+	if seconds, err := numeric.Int64(); err == nil {
+		if seconds > 100_000_000_000 || seconds < -100_000_000_000 {
+			return time.UnixMilli(seconds).UTC(), true
+		}
+		return time.Unix(seconds, 0).UTC(), true
+	}
+	seconds, err := numeric.Float64()
+	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) {
+		return time.Time{}, false
+	}
+	whole, fraction := math.Modf(seconds)
+	if whole > math.MaxInt64 || whole < math.MinInt64 {
+		return time.Time{}, false
+	}
+	return time.Unix(int64(whole), int64(fraction*float64(time.Second))).UTC(), true
+}
+
+func (a *Adapter) now() time.Time {
+	if a.Now != nil {
+		return a.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func (a *Adapter) Refresh(ctx context.Context, c provider.Credential) ([]byte, *model.ErrorDetail) {
@@ -384,3 +539,5 @@ func upstream(err error) *model.ErrorDetail {
 	}
 	return detail(teach.UpstreamUnavailable, "Codex is unavailable.")
 }
+
+func stringPtr(value string) *string { return &value }

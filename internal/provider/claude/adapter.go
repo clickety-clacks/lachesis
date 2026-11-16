@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -31,6 +32,7 @@ type Adapter struct {
 type profileMetadata struct {
 	providerAccountUUID *string
 	email               string
+	subscription        *model.UsageSubscription
 }
 
 func New(client *http.Client) *Adapter {
@@ -104,13 +106,28 @@ func (a *Adapter) Usage(ctx context.Context, c provider.Credential) (*model.Usag
 	if !provider.RawUsageSafe(raw) {
 		return nil, detail(teach.UpstreamContractChanged, "Claude usage contained a credential-bearing field.")
 	}
-	sample, detail := normalize(raw, a.Now())
+	readAt := a.now()
+	sample, detail := normalize(raw, readAt)
 	if detail != nil {
 		return nil, detail
 	}
+	subscription := claudeCredentialSubscription(c.Raw, readAt)
 	profile := a.accountProfile(ctx, c.AccessToken, contains(c.Scopes, "user:profile"))
 	sample.ProviderAccountUUID = profile.providerAccountUUID
 	sample.ProviderEmail = profile.email
+	if profile.subscription != nil {
+		subscription.Status = profile.subscription.Status
+		subscription.StatusReason = cloneString(profile.subscription.StatusReason)
+		subscription.PeriodEndUnknownReason = cloneString(profile.subscription.PeriodEndUnknownReason)
+		if profile.subscription.ObservedAt != nil {
+			subscription.ObservedAt = cloneTime(profile.subscription.ObservedAt)
+		}
+	} else {
+		subscription.Status = "unknown"
+		subscription.StatusReason = stringPtr("read_failed")
+		subscription.PeriodEndUnknownReason = stringPtr("read_failed")
+	}
+	sample.Subscription = subscription
 	return sample, nil
 }
 
@@ -132,16 +149,28 @@ func (a *Adapter) accountProfile(ctx context.Context, accessToken string, hasPro
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return profileMetadata{}
 	}
+	var raw json.RawMessage
+	if json.NewDecoder(resp.Body).Decode(&raw) != nil {
+		return profileMetadata{}
+	}
 	var profile struct {
 		Account struct {
 			UUID  string          `json:"uuid"`
 			Email json.RawMessage `json:"email"`
 		} `json:"account"`
 	}
-	if json.NewDecoder(resp.Body).Decode(&profile) != nil {
+	if json.Unmarshal(raw, &profile) != nil {
 		return profileMetadata{}
 	}
-	metadata := profileMetadata{}
+	observedAt := a.now()
+	statusRaw, present, conflict := findJSONField(raw, "subscription_status")
+	status, statusReason := mapSubscriptionStatus(statusRaw, present, conflict)
+	metadata := profileMetadata{subscription: &model.UsageSubscription{
+		Status:                 status,
+		StatusReason:           statusReason,
+		PeriodEndUnknownReason: stringPtr("not_yet_observed"),
+		ObservedAt:             &observedAt,
+	}}
 	if profile.Account.UUID != "" {
 		accountUUID := profile.Account.UUID
 		metadata.providerAccountUUID = &accountUUID
@@ -154,6 +183,115 @@ func (a *Adapter) accountProfile(ctx context.Context, accessToken string, hasPro
 	}
 	return metadata
 }
+
+func claudeCredentialSubscription(raw []byte, readAt time.Time) *model.UsageSubscription {
+	facts := &model.UsageSubscription{
+		Status:                 "unknown",
+		StatusReason:           stringPtr("read_failed"),
+		PeriodEndUnknownReason: stringPtr("read_failed"),
+	}
+	if !readAt.IsZero() {
+		observedAt := readAt.UTC()
+		facts.ObservedAt = &observedAt
+	}
+	if len(raw) == 0 {
+		facts.PlanUnknownReason = stringPtr("not_yet_observed")
+		return facts
+	}
+	value, present, conflict := findJSONField(raw, "subscriptionType")
+	if conflict {
+		facts.PlanUnknownReason = stringPtr("unrecognized_value")
+		return facts
+	}
+	if !present {
+		facts.PlanUnknownReason = stringPtr("not_exposed_by_provider")
+		return facts
+	}
+	var plan string
+	if json.Unmarshal(value, &plan) != nil {
+		facts.PlanUnknownReason = stringPtr("unrecognized_value")
+		return facts
+	}
+	facts.Plan = &plan
+	facts.PlanUnknownReason = nil
+	return facts
+}
+
+func mapSubscriptionStatus(raw json.RawMessage, present, conflict bool) (string, *string) {
+	if conflict {
+		return "unknown", stringPtr("unrecognized_value")
+	}
+	if !present {
+		return "unknown", stringPtr("not_exposed_by_provider")
+	}
+	var value string
+	if json.Unmarshal(raw, &value) != nil {
+		return "unknown", stringPtr("unrecognized_value")
+	}
+	switch value {
+	case "active", "lapsed", "free":
+		return value, nil
+	default:
+		return "unknown", stringPtr("unrecognized_value")
+	}
+}
+
+func findJSONField(document json.RawMessage, target string) (json.RawMessage, bool, bool) {
+	var found json.RawMessage
+	present := false
+	conflict := false
+	var visit func(json.RawMessage)
+	visit = func(raw json.RawMessage) {
+		var object map[string]json.RawMessage
+		if json.Unmarshal(raw, &object) == nil && object != nil {
+			for key, value := range object {
+				if key == target {
+					if present && !bytes.Equal(bytes.TrimSpace(found), bytes.TrimSpace(value)) {
+						conflict = true
+					} else {
+						found = append(found[:0], value...)
+						present = true
+					}
+				}
+				visit(value)
+			}
+			return
+		}
+		var array []json.RawMessage
+		if json.Unmarshal(raw, &array) == nil {
+			for _, value := range array {
+				visit(value)
+			}
+		}
+	}
+	visit(document)
+	return found, present, conflict
+}
+
+func (a *Adapter) now() time.Time {
+	if a.Now != nil {
+		return a.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func cloneString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := value.UTC()
+	return &copy
+}
+
+func stringPtr(value string) *string { return &value }
 
 func (a *Adapter) rateLimited(retryAfter, message, helpTopic string) *model.ErrorDetail {
 	now := time.Now().UTC()

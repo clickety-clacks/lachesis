@@ -44,6 +44,38 @@ func TestDefaultBindingRejectsRelativeClaudeConfigDir(t *testing.T) {
 	}
 }
 
+func TestClaudeCredentialUsesSubscriptionTypeNotDisplayLabel(t *testing.T) {
+	readAt := time.Date(2026, time.November, 15, 12, 0, 0, 0, time.UTC)
+	facts := claudeCredentialSubscription([]byte(`{"claudeAiOauth":{"subscriptionType":"max"},"plan_display_label":"synthetic-display-label"}`), readAt)
+	if facts.Plan == nil || *facts.Plan != "max" || facts.PlanUnknownReason != nil {
+		t.Fatalf("credential plan = %v / %v", facts.Plan, facts.PlanUnknownReason)
+	}
+	if facts.ObservedAt == nil || !facts.ObservedAt.Equal(readAt) {
+		t.Fatalf("credential observation = %v, want %v", facts.ObservedAt, readAt)
+	}
+
+	labelOnly := claudeCredentialSubscription([]byte(`{"plan_display_label":"synthetic-display-label"}`), readAt)
+	if labelOnly.Plan != nil || labelOnly.PlanUnknownReason == nil || *labelOnly.PlanUnknownReason != "not_exposed_by_provider" {
+		t.Fatalf("display label was used as the provider plan identifier: %#v", labelOnly)
+	}
+}
+
+func TestClaudeProfileSubscriptionStatusMapsOnlyDocumentedValues(t *testing.T) {
+	raw := json.RawMessage(`{"subscription_status":"active"}`)
+	statusRaw, present, conflict := findJSONField(raw, "subscription_status")
+	status, reason := mapSubscriptionStatus(statusRaw, present, conflict)
+	if status != "active" || reason != nil {
+		t.Fatalf("active profile status = %q / %v", status, reason)
+	}
+
+	raw = json.RawMessage(`{"subscription_status":"synthetic-future-state"}`)
+	statusRaw, present, conflict = findJSONField(raw, "subscription_status")
+	status, reason = mapSubscriptionStatus(statusRaw, present, conflict)
+	if status != "unknown" || reason == nil || *reason != "unrecognized_value" {
+		t.Fatalf("unmapped profile status = %q / %v", status, reason)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }

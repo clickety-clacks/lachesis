@@ -126,15 +126,29 @@ type UsageSample struct {
 	AccountID string   `json:"account_id"`
 	Provider  Provider `json:"provider"`
 	// Provider identity metadata is carried in memory to the registered-account response only.
-	ProviderAccountUUID *string         `json:"-"`
-	ProviderEmail       string          `json:"-"`
-	Label               string          `json:"label"`
-	Plan                *string         `json:"plan"`
-	ObservedAt          time.Time       `json:"observed_at"`
-	AgeSeconds          int64           `json:"age_seconds"`
-	Windows             []Window        `json:"windows"`
-	Diagnostics         []Diagnostic    `json:"diagnostics"`
-	Raw                 json.RawMessage `json:"raw"`
+	ProviderAccountUUID *string            `json:"-"`
+	ProviderEmail       string             `json:"-"`
+	Label               string             `json:"label"`
+	Plan                *string            `json:"plan"`
+	ObservedAt          time.Time          `json:"observed_at"`
+	AgeSeconds          int64              `json:"age_seconds"`
+	Windows             []Window           `json:"windows"`
+	Diagnostics         []Diagnostic       `json:"diagnostics"`
+	Raw                 json.RawMessage    `json:"raw"`
+	Subscription        *UsageSubscription `json:"-"`
+}
+
+// UsageSubscription holds normalized provider statements for summary assembly.
+// It is intentionally omitted from UsageSample's public and persisted JSON.
+type UsageSubscription struct {
+	Plan                   *string
+	PlanUnknownReason      *string
+	Status                 string
+	StatusReason           *string
+	PeriodEndAt            *time.Time
+	PeriodEndKind          *string
+	PeriodEndUnknownReason *string
+	ObservedAt             *time.Time
 }
 
 // UsageHistorySample is the persisted, provider-neutral subset of a usage
@@ -249,11 +263,33 @@ type AggregateForecast struct {
 	Diagnostics []Diagnostic        `json:"diagnostics,omitempty"`
 }
 
+type UsageSummary struct {
+	Label                              string        `json:"label"`
+	Provider                           Provider      `json:"provider"`
+	AccountState                       AccountStatus `json:"account_state"`
+	AccountStateReason                 *string       `json:"account_state_reason"`
+	UsageFreshness                     string        `json:"usage_freshness"`
+	UsageFreshnessReason               *string       `json:"usage_freshness_reason"`
+	UsageObservedAt                    *time.Time    `json:"usage_observed_at"`
+	UsageAgeSeconds                    *int64        `json:"usage_age_seconds"`
+	Plan                               *string       `json:"plan"`
+	PlanUnknownReason                  *string       `json:"plan_unknown_reason"`
+	SubscriptionStatus                 string        `json:"subscription_status"`
+	SubscriptionStatusReason           *string       `json:"subscription_status_reason"`
+	SubscriptionPeriodEndAt            *time.Time    `json:"subscription_period_end_at"`
+	SubscriptionPeriodEndKind          *string       `json:"subscription_period_end_kind"`
+	SubscriptionPeriodEndUnknownReason *string       `json:"subscription_period_end_unknown_reason"`
+	SubscriptionObservedAt             *time.Time    `json:"subscription_observed_at"`
+}
+
 type UsageResult struct {
 	AccountID string       `json:"account_id"`
 	Status    string       `json:"status"`
 	Sample    *UsageSample `json:"sample"`
 	Error     *ErrorDetail `json:"error"`
+	Summary   UsageSummary `json:"summary"`
+	// SummaryError carries cache diagnostics into summary construction only.
+	SummaryError *ErrorDetail `json:"-"`
 }
 
 type AggregateUsage struct {
