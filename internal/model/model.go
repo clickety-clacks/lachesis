@@ -135,6 +135,20 @@ type UsageSample struct {
 	Windows             []Window        `json:"windows"`
 	Diagnostics         []Diagnostic    `json:"diagnostics"`
 	Raw                 json.RawMessage `json:"raw"`
+	Subscription        *UsageSubscription `json:"-"`
+}
+
+// UsageSubscription holds normalized provider statements for summary assembly.
+// It is intentionally omitted from UsageSample's public and persisted JSON.
+type UsageSubscription struct {
+	Plan                               *string
+	PlanUnknownReason                  *string
+	Status                             string
+	StatusReason                       *string
+	PeriodEndAt                        *time.Time
+	PeriodEndKind                      *string
+	PeriodEndUnknownReason             *string
+	ObservedAt                         *time.Time
 }
 
 // UsageHistorySample is the persisted, provider-neutral subset of a usage

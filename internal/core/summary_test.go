@@ -1,7 +1,9 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,7 +12,8 @@ import (
 
 func TestUsageSummaryAlwaysSerializesAllFields(t *testing.T) {
 	row := summaryTestRow()
-	summary := buildUsageSummary(row, model.Account{Status: model.StatusUnknown}, model.UsageResult{Status: "error"}, nil)
+	generatedAt := time.Date(2026, time.November, 15, 12, 0, 0, 0, time.UTC)
+	summary := buildUsageSummary(row, model.Account{Status: model.StatusUnknown}, model.UsageResult{Status: "error"}, nil, generatedAt)
 
 	encoded, err := json.Marshal(summary)
 	if err != nil {
@@ -55,7 +58,8 @@ func TestUsageSummaryFirstFailedReadUsesReadFailureReasons(t *testing.T) {
 	failure := &model.ErrorDetail{Code: "CREDENTIAL_REJECTED"}
 	account := model.Account{Status: model.StatusReauthRequired, LastError: failure}
 	result := model.UsageResult{Status: "error", Error: failure}
-	summary := buildUsageSummary(summaryTestRow(), account, result, nil)
+	generatedAt := time.Date(2026, time.November, 15, 12, 0, 0, 0, time.UTC)
+	summary := buildUsageSummary(summaryTestRow(), account, result, nil, generatedAt)
 
 	if summary.AccountState != model.StatusReauthRequired || pointerValue(summary.AccountStateReason) != "CREDENTIAL_REJECTED" {
 		t.Fatalf("account state = %q / %v", summary.AccountState, summary.AccountStateReason)
@@ -80,7 +84,7 @@ func TestUsageSummaryStaleReadSeparatesAccountStateFromFreshness(t *testing.T) {
 		Error:  failure,
 	}
 	account := model.Account{Status: model.StatusReauthRequired, LastError: failure}
-	summary := buildUsageSummary(summaryTestRow(), account, result, nil)
+	summary := buildUsageSummary(summaryTestRow(), account, result, nil, now)
 
 	if summary.AccountState != model.StatusReauthRequired || pointerValue(summary.AccountStateReason) != "CREDENTIAL_REJECTED" {
 		t.Fatalf("account state = %q / %v", summary.AccountState, summary.AccountStateReason)
@@ -111,7 +115,7 @@ func TestUsageSummarySuccessfulOldSampleRemainsCurrentDuringRefresh(t *testing.T
 		Sample: &model.UsageSample{ObservedAt: observedAt, AgeSeconds: age},
 	}
 	account := model.Account{Status: model.StatusReady}
-	summary := buildUsageSummary(summaryTestRow(), account, result, nil)
+	summary := buildUsageSummary(summaryTestRow(), account, result, nil, now)
 
 	if summary.UsageFreshness != "current" || summary.UsageFreshnessReason != nil {
 		t.Fatalf("freshness during pending refresh = %q / %v", summary.UsageFreshness, summary.UsageFreshnessReason)
@@ -128,7 +132,7 @@ func TestUsageSummaryFreePlanHasNoPaidPeriod(t *testing.T) {
 	observedAt := time.Date(2026, time.November, 15, 12, 0, 0, 0, time.UTC)
 	plan := "free"
 	result := model.UsageResult{Status: "live", Sample: &model.UsageSample{Plan: &plan, ObservedAt: observedAt}}
-	summary := buildUsageSummary(summaryTestRow(), model.Account{Status: model.StatusReady}, result, nil)
+	summary := buildUsageSummary(summaryTestRow(), model.Account{Status: model.StatusReady}, result, nil, observedAt)
 
 	if summary.SubscriptionStatus != "free" || summary.SubscriptionStatusReason != nil {
 		t.Fatalf("free plan status = %q / %v", summary.SubscriptionStatus, summary.SubscriptionStatusReason)
@@ -138,6 +142,167 @@ func TestUsageSummaryFreePlanHasNoPaidPeriod(t *testing.T) {
 	}
 	if summary.SubscriptionObservedAt == nil || !summary.SubscriptionObservedAt.Equal(observedAt) {
 		t.Fatalf("subscription observation time = %v", summary.SubscriptionObservedAt)
+	}
+}
+
+func TestUsageSummaryCodexActiveUntilUsesStatementAndGeneratedTime(t *testing.T) {
+	statementAt := time.Date(2026, time.November, 15, 10, 0, 0, 0, time.UTC)
+	generatedAt := statementAt.Add(2 * time.Hour)
+	periodEnd := time.Date(2026, time.December, 3, 0, 0, 0, 0, time.UTC)
+	plan := "pro"
+	kind := "unstated"
+	result := model.UsageResult{
+		Status: "live",
+		Sample: &model.UsageSample{
+			Plan:       &plan,
+			ObservedAt: generatedAt,
+			Subscription: &model.UsageSubscription{
+				PeriodEndAt:  &periodEnd,
+				PeriodEndKind: &kind,
+				ObservedAt:   &statementAt,
+			},
+		},
+	}
+	summary := buildUsageSummary(summaryTestRow(), model.Account{Status: model.StatusReady}, result, nil, generatedAt)
+
+	if summary.Plan == nil || *summary.Plan != "pro" {
+		t.Fatalf("Codex plan = %v, want the usage plan identifier verbatim", summary.Plan)
+	}
+	if summary.SubscriptionStatus != "active" || summary.SubscriptionStatusReason != nil {
+		t.Fatalf("active-until summary status = %q / %v", summary.SubscriptionStatus, summary.SubscriptionStatusReason)
+	}
+	if summary.SubscriptionPeriodEndAt == nil || !summary.SubscriptionPeriodEndAt.Equal(periodEnd) || pointerValue(summary.SubscriptionPeriodEndKind) != "unstated" || summary.SubscriptionPeriodEndUnknownReason != nil {
+		t.Fatalf("period end = %v / %v / %v", summary.SubscriptionPeriodEndAt, summary.SubscriptionPeriodEndKind, summary.SubscriptionPeriodEndUnknownReason)
+	}
+	if summary.SubscriptionObservedAt == nil || !summary.SubscriptionObservedAt.Equal(statementAt) {
+		t.Fatalf("subscription observation = %v, want provider statement time %v", summary.SubscriptionObservedAt, statementAt)
+	}
+}
+
+func TestUsageSummaryCodexActiveUntilLapsedAndPassedCases(t *testing.T) {
+	generatedAt := time.Date(2026, time.December, 5, 12, 0, 0, 0, time.UTC)
+	statementAt := time.Date(2026, time.November, 15, 12, 0, 0, 0, time.UTC)
+	end := time.Date(2026, time.December, 3, 0, 0, 0, 0, time.UTC)
+	kind := "unstated"
+	plan := "pro"
+	sample := model.UsageSample{
+		Plan:       &plan,
+		ObservedAt: generatedAt,
+		Subscription: &model.UsageSubscription{
+			PeriodEndAt:  &end,
+			PeriodEndKind: &kind,
+			ObservedAt:   &statementAt,
+		},
+	}
+	summary := buildUsageSummary(summaryTestRow(), model.Account{Status: model.StatusReady}, model.UsageResult{Status: "live", Sample: &sample}, nil, generatedAt)
+	if summary.SubscriptionStatus != "unknown" || pointerValue(summary.SubscriptionStatusReason) != "period_end_passed" {
+		t.Fatalf("passed active-until summary = %q / %v", summary.SubscriptionStatus, summary.SubscriptionStatusReason)
+	}
+	if summary.SubscriptionPeriodEndAt == nil || !summary.SubscriptionPeriodEndAt.Equal(end) || pointerValue(summary.SubscriptionPeriodEndKind) != "unstated" {
+		t.Fatalf("passed statement was discarded: %v / %v", summary.SubscriptionPeriodEndAt, summary.SubscriptionPeriodEndKind)
+	}
+
+	lapsedEnd := statementAt.Add(-time.Hour)
+	sample.Subscription.PeriodEndAt = &lapsedEnd
+	summary = buildUsageSummary(summaryTestRow(), model.Account{Status: model.StatusReady}, model.UsageResult{Status: "live", Sample: &sample}, nil, generatedAt)
+	if summary.SubscriptionStatus != "lapsed" || summary.SubscriptionStatusReason != nil {
+		t.Fatalf("lapsed-at-statement summary = %q / %v", summary.SubscriptionStatus, summary.SubscriptionStatusReason)
+	}
+}
+
+func TestUsageSummaryClaudeUsesCredentialPlanAndProfileStatus(t *testing.T) {
+	generatedAt := time.Date(2026, time.November, 15, 12, 0, 0, 0, time.UTC)
+	observedAt := generatedAt.Add(-time.Minute)
+	plan := "max"
+	result := model.UsageResult{
+		Status: "live",
+		Sample: &model.UsageSample{
+			Provider:   model.ProviderClaude,
+			ObservedAt: generatedAt,
+			Subscription: &model.UsageSubscription{
+				Plan:                   &plan,
+				Status:                 "active",
+				PeriodEndUnknownReason: stringPointer("not_yet_observed"),
+				ObservedAt:              &observedAt,
+			},
+		},
+	}
+	row := summaryTestRow()
+	row.Provider = model.ProviderClaude
+	summary := buildUsageSummary(row, model.Account{Status: model.StatusReady}, result, nil, generatedAt)
+
+	if summary.Plan == nil || *summary.Plan != "max" || summary.PlanUnknownReason != nil {
+		t.Fatalf("Claude plan = %v / %v, want credential identifier", summary.Plan, summary.PlanUnknownReason)
+	}
+	if summary.SubscriptionStatus != "active" || summary.SubscriptionStatusReason != nil {
+		t.Fatalf("Claude profile status = %q / %v", summary.SubscriptionStatus, summary.SubscriptionStatusReason)
+	}
+	if summary.SubscriptionPeriodEndAt != nil || summary.SubscriptionPeriodEndUnknownReason == nil || *summary.SubscriptionPeriodEndUnknownReason != "not_yet_observed" {
+		t.Fatalf("Claude period end = %v / %v", summary.SubscriptionPeriodEndAt, summary.SubscriptionPeriodEndUnknownReason)
+	}
+	if summary.SubscriptionObservedAt == nil || !summary.SubscriptionObservedAt.Equal(observedAt) {
+		t.Fatalf("Claude subscription observation = %v, want %v", summary.SubscriptionObservedAt, observedAt)
+	}
+}
+
+func TestUsageSummaryStaleAndPendingRefreshPreserveSubscriptionFacts(t *testing.T) {
+	generatedAt := time.Date(2026, time.November, 15, 12, 0, 0, 0, time.UTC)
+	statementAt := generatedAt.Add(-time.Hour)
+	periodEnd := generatedAt.Add(24 * time.Hour)
+	kind := "unstated"
+	plan := "pro"
+	facts := &model.UsageSubscription{PeriodEndAt: &periodEnd, PeriodEndKind: &kind, ObservedAt: &statementAt}
+	sample := &model.UsageSample{Plan: &plan, ObservedAt: statementAt, AgeSeconds: 3600, Subscription: facts}
+	failure := &model.ErrorDetail{Code: "UPSTREAM_UNAVAILABLE"}
+	stale := buildUsageSummary(summaryTestRow(), model.Account{Status: model.StatusDegraded, LastError: failure}, model.UsageResult{Status: "stale", Sample: sample, Error: failure}, nil, generatedAt)
+	if stale.UsageFreshness != "stale" || stale.SubscriptionStatus != "active" || stale.SubscriptionPeriodEndAt == nil || !stale.SubscriptionPeriodEndAt.Equal(periodEnd) {
+		t.Fatalf("stale summary lost an earlier provider statement: %#v", stale)
+	}
+	pending := buildUsageSummary(summaryTestRow(), model.Account{Status: model.StatusReady}, model.UsageResult{Status: "stale", Sample: sample}, nil, generatedAt)
+	if pending.UsageFreshness != "current" || pending.UsageFreshnessReason != nil || pending.SubscriptionStatus != "active" {
+		t.Fatalf("pending refresh summary = %#v", pending)
+	}
+	if sample.Subscription.PeriodEndAt == nil || !sample.Subscription.PeriodEndAt.Equal(periodEnd) {
+		t.Fatal("summary assembly mutated the cached provider statement")
+	}
+}
+
+func TestBackgroundFreshCacheHitRetainsRecentFailure(t *testing.T) {
+	now := time.Date(2026, time.November, 15, 12, 0, 0, 0, time.UTC)
+	cache := NewCache()
+	cache.now = func() time.Time { return now }
+	cache.Install("synthetic-account", model.UsageSample{ObservedAt: now.Add(-20 * time.Second)})
+	failure := &model.ErrorDetail{Code: "UPSTREAM_UNAVAILABLE"}
+	_, _, started := cache.FetchForced(context.Background(), "synthetic-account", func(context.Context) (*model.UsageSample, *model.ErrorDetail) {
+		return nil, failure
+	})
+	if !started {
+		t.Fatal("forced failure check did not start")
+	}
+
+	service := &Service{cache: cache, now: func() time.Time { return now }}
+	row := model.RegistryAccount{ID: "synthetic-account", Label: "work", Provider: model.ProviderCodex}
+	result := service.usageResult(context.Background(), row, "background")
+	if result.Status != "cache" || result.Sample == nil || result.Error != failure {
+		t.Fatalf("fresh cache hit lost the last failure or changed result status: %#v", result)
+	}
+	summary := buildUsageSummary(row, model.Account{Status: model.StatusDegraded, LastError: failure}, result, nil, now)
+	if summary.UsageFreshness != "stale" || pointerValue(summary.UsageFreshnessReason) != failure.Code {
+		t.Fatalf("fresh cache hit hid the latest completed failure: %q / %v", summary.UsageFreshness, summary.UsageFreshnessReason)
+	}
+}
+
+func TestUsageSampleOmitsInternalSubscriptionFacts(t *testing.T) {
+	plan := "max"
+	encoded, err := json.Marshal(model.UsageSample{
+		Provider: model.ProviderClaude,
+		Subscription: &model.UsageSubscription{Plan: &plan, Status: "active"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "subscription") || strings.Contains(string(encoded), "max") {
+		t.Fatalf("internal subscription facts changed public sample JSON: %s", encoded)
 	}
 }
 

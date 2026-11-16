@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -37,7 +38,7 @@ func TestNormalizeOmitsMalformedAdditionalWindows(t *testing.T) {
 }
 
 func TestNormalizePreservesValidRawResponse(t *testing.T) {
-	raw := json.RawMessage(`{"plan_type":"fixed","rate_limit":{"primary_window":{"used_percent":10,"reset_after_seconds":60}},"additional_rate_limits":[]}`)
+	raw := json.RawMessage(`{"plan_type":"pro","rate_limit":{"primary_window":{"used_percent":10,"reset_after_seconds":60}},"additional_rate_limits":[]}`)
 	sample, detail := normalize(raw, time.Unix(1, 0))
 	if detail != nil {
 		t.Fatal(detail)
@@ -46,8 +47,40 @@ func TestNormalizePreservesValidRawResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sample.Windows) != 1 || sample.Windows[0].UsedPercent != 10 || len(sample.Diagnostics) != 0 || string(sample.Raw) != string(raw) || !strings.Contains(string(encoded), `"diagnostics":[]`) {
+	if len(sample.Windows) != 1 || sample.Windows[0].UsedPercent != 10 || sample.Plan == nil || *sample.Plan != "pro" || len(sample.Diagnostics) != 0 || string(sample.Raw) != string(raw) || !strings.Contains(string(encoded), `"diagnostics":[]`) {
 		t.Fatalf("sample = %#v", sample)
+	}
+}
+
+func TestCodexSubscriptionMapsNamespacedClaimsWithoutInferringRenewal(t *testing.T) {
+	statementAt := time.Date(2026, time.November, 15, 12, 0, 0, 0, time.UTC)
+	periodEnd := time.Date(2026, time.December, 3, 0, 0, 0, 0, time.UTC)
+	payload := `{"iat":1794744000,"https://api.openai.com/auth":{"chatgpt_subscription_last_checked":1794747600,"chatgpt_subscription_active_until":1796256000}}`
+	token := "header." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
+	facts := codexSubscription(token, statementAt.Add(time.Hour))
+	wantObservedAt := statementAt.Add(time.Hour)
+	wantPeriodEnd := periodEnd
+	if facts.ObservedAt == nil || !facts.ObservedAt.Equal(wantObservedAt) {
+		t.Fatalf("subscription observation = %v, want last_checked %v", facts.ObservedAt, wantObservedAt)
+	}
+	if facts.PeriodEndAt == nil || !facts.PeriodEndAt.Equal(wantPeriodEnd) || facts.PeriodEndKind == nil || *facts.PeriodEndKind != "unstated" {
+		t.Fatalf("subscription period = %v / %v", facts.PeriodEndAt, facts.PeriodEndKind)
+	}
+	if facts.PeriodEndUnknownReason != nil || facts.StatusReason != nil {
+		t.Fatalf("recognized source claims have unknown reasons: %#v", facts)
+	}
+}
+
+func TestCodexSubscriptionUsesIATAndReportsUnmappedActiveUntil(t *testing.T) {
+	iat := time.Date(2026, time.November, 15, 12, 0, 0, 0, time.UTC)
+	payload := `{"iat":1794744000,"https://api.openai.com/auth":{"chatgpt_subscription_active_until":"unmapped-date"}}`
+	token := "header." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
+	facts := codexSubscription(token, time.Time{})
+	if facts.ObservedAt == nil || !facts.ObservedAt.Equal(iat) {
+		t.Fatalf("subscription observation = %v, want iat %v", facts.ObservedAt, iat)
+	}
+	if facts.PeriodEndAt != nil || facts.PeriodEndUnknownReason == nil || *facts.PeriodEndUnknownReason != "unrecognized_value" || facts.StatusReason == nil || *facts.StatusReason != "unrecognized_value" {
+		t.Fatalf("unmapped active_until = %#v", facts)
 	}
 }
 

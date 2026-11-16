@@ -256,7 +256,34 @@ func copyUsageSample(sample *model.UsageSample) *model.UsageSample {
 		out.Raw = make([]byte, len(sample.Raw))
 		copy(out.Raw, sample.Raw)
 	}
+	if sample.Subscription != nil {
+		subscription := *sample.Subscription
+		subscription.Plan = cloneStringValue(sample.Subscription.Plan)
+		subscription.PlanUnknownReason = cloneStringValue(sample.Subscription.PlanUnknownReason)
+		subscription.StatusReason = cloneStringValue(sample.Subscription.StatusReason)
+		subscription.PeriodEndAt = cloneTimeValue(sample.Subscription.PeriodEndAt)
+		subscription.PeriodEndKind = cloneStringValue(sample.Subscription.PeriodEndKind)
+		subscription.PeriodEndUnknownReason = cloneStringValue(sample.Subscription.PeriodEndUnknownReason)
+		subscription.ObservedAt = cloneTimeValue(sample.Subscription.ObservedAt)
+		out.Subscription = &subscription
+	}
 	return &out
+}
+
+func cloneStringValue(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneTimeValue(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copy := value.UTC()
+	return &copy
 }
 
 func timeoutError() *model.ErrorDetail {
