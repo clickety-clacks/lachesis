@@ -204,8 +204,10 @@ func TestUsageSummaryCodexActiveUntilLapsedAndPassedCases(t *testing.T) {
 
 	lapsedEnd := statementAt.Add(-time.Hour)
 	sample.Subscription.PeriodEndAt = &lapsedEnd
+	expiresKind := "expires"
+	sample.Subscription.PeriodEndKind = &expiresKind
 	summary = buildUsageSummary(summaryTestRow(), model.Account{Status: model.StatusReady}, model.UsageResult{Status: "live", Sample: &sample}, nil, generatedAt)
-	if summary.SubscriptionStatus != "lapsed" || summary.SubscriptionStatusReason != nil {
+	if summary.SubscriptionStatus != "lapsed" || summary.SubscriptionStatusReason != nil || pointerValue(summary.SubscriptionPeriodEndKind) != "expires" {
 		t.Fatalf("lapsed-at-statement summary = %q / %v", summary.SubscriptionStatus, summary.SubscriptionStatusReason)
 	}
 }

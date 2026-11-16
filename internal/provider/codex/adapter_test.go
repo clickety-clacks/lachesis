@@ -71,6 +71,31 @@ func TestCodexSubscriptionMapsNamespacedClaimsWithoutInferringRenewal(t *testing
 	}
 }
 
+func TestCodexSubscriptionPeriodEndKindUsesStatementTime(t *testing.T) {
+	statementAt := time.Date(2026, time.November, 15, 13, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		activeUntil string
+		wantKind    string
+	}{
+		{name: "past", activeUntil: "1794744000", wantKind: "expires"},
+		{name: "equal", activeUntil: "1794747600", wantKind: "unstated"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payload := `{"iat":1794744000,"https://api.openai.com/auth":{"chatgpt_subscription_last_checked":1794747600,"chatgpt_subscription_active_until":` + test.activeUntil + `}}`
+			token := "header." + base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
+			facts := codexSubscription(token, statementAt.Add(time.Hour))
+			if facts.ObservedAt == nil || !facts.ObservedAt.Equal(statementAt) {
+				t.Fatalf("subscription observation = %v, want %v", facts.ObservedAt, statementAt)
+			}
+			if facts.PeriodEndAt == nil || facts.PeriodEndKind == nil || *facts.PeriodEndKind != test.wantKind {
+				t.Fatalf("period end kind = %v, want %q", facts.PeriodEndKind, test.wantKind)
+			}
+		})
+	}
+}
+
 func TestCodexSubscriptionUsesIATAndReportsUnmappedActiveUntil(t *testing.T) {
 	iat := time.Date(2026, time.November, 15, 12, 0, 0, 0, time.UTC)
 	payload := `{"iat":1794744000,"https://api.openai.com/auth":{"chatgpt_subscription_active_until":"unmapped-date"}}`

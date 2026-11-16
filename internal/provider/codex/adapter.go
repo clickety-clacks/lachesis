@@ -157,8 +157,11 @@ func codexSubscription(idToken string, readAt time.Time) *model.UsageSubscriptio
 		return facts
 	}
 	facts.PeriodEndAt = &periodEnd
-	// active_until states a boundary, not whether the provider will renew.
-	facts.PeriodEndKind = stringPtr("unstated")
+	kind := "unstated"
+	if facts.ObservedAt != nil && periodEnd.Before(*facts.ObservedAt) {
+		kind = "expires"
+	}
+	facts.PeriodEndKind = stringPtr(kind)
 	return facts
 }
 
